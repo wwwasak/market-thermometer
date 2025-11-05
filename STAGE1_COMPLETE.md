@@ -174,7 +174,30 @@ python -c "from core.config import Config; c=Config(); ind=c.get_indicator_confi
 4. ✅ **依赖明确** - requirements.txt列出所有必要的包
 5. ✅ **测试通过** - 所有配置功能经过验证
 
+## ⚠️ Python 版本兼容性说明
+
+**重要**: Python 3.13 当前与 pandas 2.1.4 不兼容，推荐使用 Python 3.11 或 3.12。
+
+如果您使用 Anaconda，请参考：
+- **快速指南**: [QUICKSTART_CONDA.md](QUICKSTART_CONDA.md)
+- **详细说明**: [SETUP_CONDA.md](SETUP_CONDA.md)
+- **自动脚本**: 运行 `.\setup_env.ps1`
+
 ## ➡️ 下一步
+
+### 1. 设置Python环境（如果还没做）
+
+```powershell
+# 使用 Anaconda（推荐）
+conda create -n market-thermo python=3.11 -y
+conda activate market-thermo
+pip install -r requirements.txt
+
+# 验证
+python test_config_simple.py
+```
+
+### 2. 准备进入阶段2
 
 现在可以进入**阶段2：核心转换和评分逻辑**
 

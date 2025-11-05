@@ -17,7 +17,7 @@
 
 ## 🛠️ 技术栈
 
-- **Python**: 3.13+
+- **Python**: 3.11 或 3.12（推荐，3.13暂不兼容）
 - **GUI框架**: PyQt6
 - **图表库**: matplotlib
 - **数据处理**: pandas, numpy, scipy
@@ -27,27 +27,62 @@
 
 ## 📦 安装步骤
 
-### 1. 克隆或下载项目
+### 方式A: 使用Anaconda（推荐）
+
+#### 1. 克隆或下载项目
 
 ```powershell
 git clone https://github.com/yourusername/market-thermometer.git
 cd market-thermometer
 ```
 
-### 2. 创建虚拟环境（推荐）
+#### 2. 创建conda环境
+
+```powershell
+# 使用environment.yml自动创建（推荐）
+conda env create -f environment.yml
+
+# 或手动创建
+# conda create -n market-thermo python=3.11 -y
+```
+
+#### 3. 激活环境
+
+```powershell
+conda activate market-thermo
+```
+
+#### 4. 安装依赖（如果手动创建环境）
+
+```powershell
+pip install -r requirements.txt
+```
+
+**详细说明**: 参见 [SETUP_CONDA.md](SETUP_CONDA.md)
+
+### 方式B: 使用venv（需要Python 3.11或3.12）
+
+#### 1. 克隆或下载项目
+
+```powershell
+git clone https://github.com/yourusername/market-thermometer.git
+cd market-thermometer
+```
+
+#### 2. 创建虚拟环境
 
 ```powershell
 python -m venv venv
 .\venv\Scripts\Activate.ps1
 ```
 
-### 3. 安装依赖
+#### 3. 安装依赖
 
 ```powershell
 pip install -r requirements.txt
 ```
 
-### 4. 配置环境变量
+### 配置环境变量（两种方式都需要）
 
 复制 `env.example` 为 `.env` 并填入必要的API密钥：
 

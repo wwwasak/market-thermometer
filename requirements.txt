@@ -1,5 +1,5 @@
 # 双市场温度计 - Python依赖包
-# Python 3.13+
+# Python 3.11 或 3.12 推荐（3.13暂不兼容pandas 2.1.4）
 
 # GUI框架
 PyQt6==6.6.1
