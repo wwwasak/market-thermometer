@@ -1,0 +1,563 @@
+"""
+数据源模块
+
+提供从各种数据源获取市场数据的接口：
+- FRED (Federal Reserve Economic Data)
+- yfinance (Yahoo Finance)
+- CSV文件导入
+"""
+
+import os
+import pandas as pd
+import numpy as np
+from typing import Optional, List, Dict, Any, Tuple
+from datetime import datetime, date, timedelta
+import time
+
+# 环境变量和配置
+from dotenv import load_dotenv
+load_dotenv()
+
+
+class DataFetchError(Exception):
+    """数据获取错误"""
+    pass
+
+
+class FREDFetcher:
+    """
+    FRED (Federal Reserve Economic Data) 数据获取器
+    
+    需要 FRED_API_KEY 环境变量
+    """
+    
+    def __init__(self, api_key: Optional[str] = None):
+        """
+        初始化FRED获取器
+        
+        @param {Optional[str]} api_key - FRED API密钥，如果不提供则从环境变量读取
+        """
+        self.api_key = api_key or os.getenv('FRED_API_KEY')
+        
+        if not self.api_key:
+            print("[WARNING] FRED_API_KEY not found. Set it in .env file or pass to constructor.")
+        
+        self.fred = None
+        if self.api_key:
+            try:
+                from fredapi import Fred
+                self.fred = Fred(api_key=self.api_key)
+            except ImportError:
+                print("[ERROR] fredapi not installed. Run: pip install fredapi")
+            except Exception as e:
+                print(f"[ERROR] Failed to initialize FRED: {e}")
+    
+    def fetch(
+        self,
+        series_id: str,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        retry: int = 3,
+        retry_delay: float = 1.0
+    ) -> pd.Series:
+        """
+        获取FRED时间序列数据
+        
+        @param {str} series_id - FRED序列ID（如 'RRPONTSYD', 'WTREGEN'）
+        @param {Optional[datetime]} start_date - 开始日期
+        @param {Optional[datetime]} end_date - 结束日期
+        @param {int} retry - 重试次数
+        @param {float} retry_delay - 重试延迟（秒）
+        @returns {pd.Series} 时间序列数据
+        
+        @example
+        >>> fetcher = FREDFetcher()
+        >>> rrp = fetcher.fetch('RRPONTSYD', start_date=datetime(2024, 1, 1))
+        """
+        if not self.fred:
+            raise DataFetchError("FRED not initialized. Check API key.")
+        
+        for attempt in range(retry):
+            try:
+                data = self.fred.get_series(
+                    series_id,
+                    observation_start=start_date,
+                    observation_end=end_date
+                )
+                
+                if data is None or len(data) == 0:
+                    raise DataFetchError(f"No data returned for {series_id}")
+                
+                # 确保索引是DatetimeIndex
+                if not isinstance(data.index, pd.DatetimeIndex):
+                    data.index = pd.to_datetime(data.index)
+                
+                print(f"[OK] Fetched {len(data)} records for {series_id}")
+                return data
+            
+            except Exception as e:
+                if attempt < retry - 1:
+                    print(f"[WARNING] Attempt {attempt + 1} failed for {series_id}: {e}")
+                    time.sleep(retry_delay)
+                else:
+                    raise DataFetchError(f"Failed to fetch {series_id} after {retry} attempts: {e}")
+    
+    def fetch_multiple(
+        self,
+        series_ids: List[str],
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> Dict[str, pd.Series]:
+        """
+        批量获取多个FRED序列
+        
+        @param {List[str]} series_ids - FRED序列ID列表
+        @returns {Dict[str, pd.Series]} 序列字典 {series_id: data}
+        """
+        results = {}
+        
+        for series_id in series_ids:
+            try:
+                data = self.fetch(series_id, start_date, end_date)
+                results[series_id] = data
+            except DataFetchError as e:
+                print(f"[ERROR] Failed to fetch {series_id}: {e}")
+                results[series_id] = pd.Series(dtype=float)
+        
+        return results
+
+
+class YFinanceFetcher:
+    """
+    yfinance (Yahoo Finance) 数据获取器
+    
+    用于获取股票、指数、外汇等价格数据
+    """
+    
+    def __init__(self):
+        """初始化yfinance获取器"""
+        self.yf = None
+        try:
+            import yfinance as yf
+            self.yf = yf
+        except ImportError:
+            print("[ERROR] yfinance not installed. Run: pip install yfinance")
+    
+    def fetch(
+        self,
+        ticker: str,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        column: str = 'Close',
+        retry: int = 3,
+        retry_delay: float = 1.0
+    ) -> pd.Series:
+        """
+        获取yfinance价格数据
+        
+        @param {str} ticker - 股票代码（如 '^VIX', 'SPY', 'IWM'）
+        @param {Optional[datetime]} start_date - 开始日期
+        @param {Optional[datetime]} end_date - 结束日期
+        @param {str} column - 使用的列（'Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume'）
+        @param {int} retry - 重试次数
+        @param {float} retry_delay - 重试延迟（秒）
+        @returns {pd.Series} 时间序列数据
+        
+        @example
+        >>> fetcher = YFinanceFetcher()
+        >>> vix = fetcher.fetch('^VIX', start_date=datetime(2024, 1, 1))
+        """
+        if not self.yf:
+            raise DataFetchError("yfinance not initialized.")
+        
+        for attempt in range(retry):
+            try:
+                # 使用Ticker对象下载数据（更可靠）
+                ticker_obj = self.yf.Ticker(ticker)
+                df = ticker_obj.history(
+                    start=start_date,
+                    end=end_date,
+                    auto_adjust=True
+                )
+                
+                if df is None or len(df) == 0:
+                    raise DataFetchError(f"No data returned for {ticker}")
+                
+                # 提取指定列
+                if column not in df.columns:
+                    available = ', '.join(df.columns)
+                    raise DataFetchError(f"Column '{column}' not found. Available: {available}")
+                
+                series = df[column]
+                series = series.dropna()
+                
+                if len(series) == 0:
+                    raise DataFetchError(f"No valid data for {ticker}")
+                
+                print(f"[OK] Fetched {len(series)} records for {ticker}")
+                return series
+            
+            except Exception as e:
+                if attempt < retry - 1:
+                    print(f"[WARNING] Attempt {attempt + 1} failed for {ticker}: {e}")
+                    time.sleep(retry_delay)
+                else:
+                    raise DataFetchError(f"Failed to fetch {ticker} after {retry} attempts: {e}")
+    
+    def fetch_multiple(
+        self,
+        tickers: List[str],
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        column: str = 'Close'
+    ) -> Dict[str, pd.Series]:
+        """
+        批量获取多个ticker数据
+        
+        @param {List[str]} tickers - ticker列表
+        @returns {Dict[str, pd.Series]} 序列字典
+        """
+        results = {}
+        
+        for ticker in tickers:
+            try:
+                data = self.fetch(ticker, start_date, end_date, column)
+                results[ticker] = data
+            except DataFetchError as e:
+                print(f"[ERROR] Failed to fetch {ticker}: {e}")
+                results[ticker] = pd.Series(dtype=float)
+        
+        return results
+    
+    def fetch_pair(
+        self,
+        ticker1: str,
+        ticker2: str,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> Tuple[pd.Series, pd.Series]:
+        """
+        获取一对ticker数据（用于相对收益率计算）
+        
+        @param {str} ticker1 - 第一个ticker
+        @param {str} ticker2 - 第二个ticker
+        @returns {Tuple[pd.Series, pd.Series]} 对齐后的两个序列
+        """
+        data1 = self.fetch(ticker1, start_date, end_date)
+        data2 = self.fetch(ticker2, start_date, end_date)
+        
+        # 对齐索引
+        data1, data2 = data1.align(data2, join='inner')
+        
+        return data1, data2
+
+
+class CSVImporter:
+    """
+    CSV文件导入器
+    
+    用于导入中国市场特有数据（两融余额、北向成交等）
+    """
+    
+    def __init__(self):
+        """初始化CSV导入器"""
+        pass
+    
+    def import_csv(
+        self,
+        file_path: str,
+        date_col: str = 'date',
+        value_col: str = 'value',
+        date_format: Optional[str] = None,
+        skiprows: Optional[int] = None,
+        encoding: str = 'utf-8'
+    ) -> pd.Series:
+        """
+        从CSV文件导入时间序列数据
+        
+        @param {str} file_path - CSV文件路径
+        @param {str} date_col - 日期列名
+        @param {str} value_col - 数值列名
+        @param {Optional[str]} date_format - 日期格式（如 '%Y-%m-%d'）
+        @param {Optional[int]} skiprows - 跳过的行数
+        @param {str} encoding - 文件编码
+        @returns {pd.Series} 时间序列数据
+        
+        @example
+        >>> importer = CSVImporter()
+        >>> margin = importer.import_csv('cn_margin_balance.csv')
+        """
+        try:
+            # 读取CSV
+            df = pd.read_csv(
+                file_path,
+                skiprows=skiprows,
+                encoding=encoding
+            )
+            
+            # 检查列是否存在
+            if date_col not in df.columns:
+                raise DataFetchError(f"Date column '{date_col}' not found in CSV")
+            if value_col not in df.columns:
+                raise DataFetchError(f"Value column '{value_col}' not found in CSV")
+            
+            # 解析日期
+            if date_format:
+                df[date_col] = pd.to_datetime(df[date_col], format=date_format)
+            else:
+                df[date_col] = pd.to_datetime(df[date_col])
+            
+            # 转换为Series
+            df = df.set_index(date_col)
+            series = df[value_col]
+            
+            # 转换为数值类型
+            series = pd.to_numeric(series, errors='coerce')
+            
+            # 删除NaN
+            series = series.dropna()
+            
+            # 排序
+            series = series.sort_index()
+            
+            print(f"[OK] Imported {len(series)} records from {file_path}")
+            return series
+        
+        except Exception as e:
+            raise DataFetchError(f"Failed to import {file_path}: {e}")
+    
+    def import_multiple_csvs(
+        self,
+        file_configs: List[Dict[str, Any]]
+    ) -> Dict[str, pd.Series]:
+        """
+        批量导入多个CSV文件
+        
+        @param {List[Dict]} file_configs - 文件配置列表，每个配置包含file_path和其他参数
+        @returns {Dict[str, pd.Series]} 序列字典 {code: data}
+        
+        @example
+        >>> configs = [
+        ...     {'code': 'MARGIN', 'file_path': 'margin.csv', 'value_col': 'balance'},
+        ...     {'code': 'NORTH', 'file_path': 'north.csv', 'value_col': 'ratio'}
+        ... ]
+        >>> data = importer.import_multiple_csvs(configs)
+        """
+        results = {}
+        
+        for config in file_configs:
+            code = config.pop('code')
+            file_path = config.get('file_path')
+            
+            try:
+                data = self.import_csv(**config)
+                results[code] = data
+            except DataFetchError as e:
+                print(f"[ERROR] Failed to import {code} from {file_path}: {e}")
+                results[code] = pd.Series(dtype=float)
+        
+        return results
+
+
+class DataSourceManager:
+    """
+    数据源管理器
+    
+    统一管理所有数据源，提供高级接口
+    """
+    
+    def __init__(self, fred_api_key: Optional[str] = None):
+        """
+        初始化数据源管理器
+        
+        @param {Optional[str]} fred_api_key - FRED API密钥
+        """
+        self.fred_fetcher = FREDFetcher(fred_api_key)
+        self.yf_fetcher = YFinanceFetcher()
+        self.csv_importer = CSVImporter()
+    
+    def fetch_by_config(
+        self,
+        indicator_config: Dict[str, Any],
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> pd.Series:
+        """
+        根据指标配置获取数据
+        
+        @param {Dict} indicator_config - 指标配置（包含source和ticker信息）
+        @returns {pd.Series} 时间序列数据
+        
+        @example
+        >>> config = {
+        ...     'code': 'VIX_LOG',
+        ...     'source': 'yfinance',
+        ...     'ticker': '^VIX'
+        ... }
+        >>> data = manager.fetch_by_config(config)
+        """
+        source = indicator_config.get('source', '').lower()
+        ticker = indicator_config.get('ticker')
+        code = indicator_config.get('code', 'UNKNOWN')
+        
+        try:
+            if source == 'fred':
+                return self.fred_fetcher.fetch(ticker, start_date, end_date)
+            
+            elif source == 'yfinance':
+                return self.yf_fetcher.fetch(ticker, start_date, end_date)
+            
+            elif source == 'csv':
+                # CSV需要事先导入，这里返回空
+                print(f"[WARNING] {code} requires manual CSV import")
+                return pd.Series(dtype=float)
+            
+            else:
+                raise DataFetchError(f"Unknown source: {source}")
+        
+        except DataFetchError as e:
+            print(f"[ERROR] Failed to fetch {code}: {e}")
+            return pd.Series(dtype=float)
+    
+    def fetch_all_indicators(
+        self,
+        indicator_configs: List[Dict[str, Any]],
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> Dict[str, pd.Series]:
+        """
+        批量获取所有指标数据
+        
+        @param {List[Dict]} indicator_configs - 指标配置列表
+        @returns {Dict[str, pd.Series]} 数据字典 {code: series}
+        """
+        results = {}
+        
+        print(f"\n[INFO] Fetching {len(indicator_configs)} indicators...")
+        
+        for config in indicator_configs:
+            code = config.get('code', 'UNKNOWN')
+            print(f"\n[INFO] Fetching {code}...")
+            
+            data = self.fetch_by_config(config, start_date, end_date)
+            results[code] = data
+            
+            # 简短延迟避免API限制
+            time.sleep(0.2)
+        
+        print(f"\n[OK] Fetched {len([d for d in results.values() if len(d) > 0])}/{len(indicator_configs)} indicators successfully")
+        
+        return results
+
+
+def align_to_business_days(
+    series: pd.Series,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None
+) -> pd.Series:
+    """
+    将序列对齐到工作日（business days）
+    
+    @param {pd.Series} series - 输入序列
+    @param {Optional[datetime]} start_date - 开始日期
+    @param {Optional[datetime]} end_date - 结束日期
+    @returns {pd.Series} 对齐后的序列
+    """
+    if len(series) == 0:
+        return series
+    
+    # 确定日期范围
+    if start_date is None:
+        start_date = series.index.min()
+    if end_date is None:
+        end_date = series.index.max()
+    
+    # 创建工作日范围
+    business_days = pd.bdate_range(start=start_date, end=end_date)
+    
+    # 重索引并前向填充
+    aligned = series.reindex(business_days, method='ffill')
+    
+    return aligned
+
+
+def clean_series(
+    series: pd.Series,
+    remove_outliers: bool = False,
+    outlier_std: float = 5.0,
+    interpolate: bool = False
+) -> pd.Series:
+    """
+    清洗时间序列数据
+    
+    @param {pd.Series} series - 输入序列
+    @param {bool} remove_outliers - 是否移除异常值
+    @param {float} outlier_std - 异常值标准差倍数
+    @param {bool} interpolate - 是否插值填充缺失值
+    @returns {pd.Series} 清洗后的序列
+    """
+    cleaned = series.copy()
+    
+    # 移除异常值（使用中位数和MAD，对异常值更稳健）
+    if remove_outliers and len(cleaned) > 0:
+        median = cleaned.median()
+        mad = (cleaned - median).abs().median()
+        
+        if mad > 0:
+            # 使用MAD方法
+            mad_score = (cleaned - median).abs() / mad
+            # MAD-Z > 3.5 通常被认为是异常值
+            threshold = outlier_std * 1.4826  # 转换因子
+            cleaned = cleaned.where(mad_score <= threshold)
+        else:
+            # 如果MAD为0，使用标准差方法
+            mean = cleaned.mean()
+            std = cleaned.std()
+            if std > 0:
+                lower_bound = mean - outlier_std * std
+                upper_bound = mean + outlier_std * std
+                cleaned = cleaned.where((cleaned >= lower_bound) & (cleaned <= upper_bound))
+    
+    # 插值
+    if interpolate:
+        cleaned = cleaned.interpolate(method='linear', limit_direction='forward')
+    
+    # 删除仍然为NaN的值
+    cleaned = cleaned.dropna()
+    
+    return cleaned
+
+
+def validate_series(
+    series: pd.Series,
+    min_length: int = 60,
+    max_gap_days: int = 30
+) -> Tuple[bool, str]:
+    """
+    验证时间序列数据质量
+    
+    @param {pd.Series} series - 输入序列
+    @param {int} min_length - 最小长度要求
+    @param {int} max_gap_days - 最大允许间隔天数
+    @returns {Tuple[bool, str]} (是否通过, 错误信息)
+    """
+    if len(series) == 0:
+        return False, "Series is empty"
+    
+    if len(series) < min_length:
+        return False, f"Series too short: {len(series)} < {min_length}"
+    
+    # 检查时间间隔
+    if len(series) > 1:
+        time_diffs = series.index.to_series().diff().dt.days
+        max_gap = time_diffs.max()
+        
+        if pd.notna(max_gap) and max_gap > max_gap_days:
+            return False, f"Large gap detected: {max_gap} days"
+    
+    # 检查数据质量
+    if series.isna().all():
+        return False, "All values are NaN"
+    
+    return True, "OK"
+
