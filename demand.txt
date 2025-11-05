@@ -1,0 +1,312 @@
+Build a Python desktop app “Dual Market Thermometer” with the following spec.
+
+0) Tech stack & repo layout
+
+Python 3.13
+
+GUI: PyQt6
+
+Charts: matplotlib (one chart per tab; no seaborn)
+
+Data: yfinance, fredapi; optional akshare (if available) for CN; plus CSV import fallback
+
+Storage: SQLite + SQLAlchemy
+
+Config: python-dotenv for FRED_API_KEY
+
+Project structure
+
+dual-thermo/
+  app.py
+  core/
+    config.py          # hard-coded defaults + load/save JSON params
+    datasource.py      # fetchers: FRED, yfinance, akshare (optional), CSV import
+    transforms.py      # Δ20d, %Δ20d, relret20, slope_20_60_ewma, log+winsor, resampling
+    scoring.py         # Z / MAD-Z, score(0-100), regime & lamps (daily/weekly)
+    combine.py         # soft-confirm weighted vote, hard-veto MIN+persistence
+    scheduler.py       # update tasks: daily & weekly pipelines
+  storage/
+    models.py          # SQLAlchemy models
+    repository.py      # read/write series & scores
+    migrate.py         # init/migrate DB
+  ui/
+    main_window.py     # tabs, splitters, menus
+    panels.py          # left control panel; CN/US overview panel
+    charts.py          # reusable matplotlib widgets
+    tables.py          # QTableView for indicator table & params
+  assets/
+    icons/
+  tests/
+    test_scoring.py
+    test_transforms.py
+    test_repo.py
+  .env.example
+  README.md
+  requirements.txt or pyproject.toml
+
+1) Business requirements (CN & US run independently; NO “total score”)
+
+We need two independent thermometers: CN and US.
+For each market we must support:
+
+Indicators (main, in-scoring) and Observers (soft/hard confirm, NOT in-scoring)
+
+Daily pipeline: compute daily Z & Score (0–100), daily regime (Attack / Balanced / Defense), and daily Final Lamp (Green / Yellow / Red).
+
+Weekly pipeline: same logic, but reindexed to Friday (for weekly report).
+
+GUI must allow switching daily/weekly views.
+
+2) Indicator set, directions, transforms, standardization
+2.1 CN main indicators (go into CN scoring)
+Code	Name	Direction	Transform (daily)	Weekly aggregation	Z type
+CN_MARGIN_SLOPE	两融余额斜率(20/60, 0.6/0.4合成, EWMA λ=0.94)	up_good	slope_20_60_ewma(lmbd=0.94) on daily margin balance	last value of week	Z(60)
+CNH_PCT20	USD/CNH 20日%变动（收盘）	down_good	pct20	last value of week	MADZ(60)
+NORTH_TURNOVER_SHARE	北向成交额/全A成交额（占比）	up_good	raw ratio (daily)	last value or 5d mean	MADZ(60)
+CSI1000_OVER_300_REL20	中证1000/沪深300 20日相对收益	up_good	relret20 (I1000 vs I300)	last value of week	MADZ(40)
+PMI_NEWORDER_YOY_STD	官方PMI 新订单（同比标准化）	up_good	monthly yoy std → ffill to daily	last value of week	Z(90)
+CN_EPS_YIELD_MINUS_CGB10	股债收益差（全A盈利收益率–10Y国债）	up_good	raw	last value of week	Z(60) then winsor to ±3σ
+2.2 CN observers (confirm layer ONLY; not in scoring)
+
+Hard veto: ETF_NETFLOW_5D 宽基ETF 5日净申赎（亿元）
+
+Soft confirm pairs:
+
+PAIR_CNH_CNY: USD/CNH vs USD/CNY → combine to one lamp (rule A)
+
+PAIR_TWEX_DXY: Trade-Weighted USD (DTWEXBGS) vs DXY → one lamp (rule A)
+
+2.3 US main indicators (go into US scoring)
+Code	Name	Direction	Transform (daily)	Weekly aggregation	Z type
+RRP_D20	RRP Δ20d	down_good	delta20 (from FRED daily or resampled)	resample to Friday / last	Z(60)
+TGA_D20	TGA Δ20d	down_good	delta20	resample to Friday / last	Z(60)
+HY_OAS	HY OAS（高收益债利差）	down_good	raw	resample to Friday / last	MADZ(60)
+VIX_LOG	VIX（log & winsor 2%~98%）	down_good	log then winsor	Friday close	MADZ(40)
+DFII10	10Y TIPS 实际利率	down_good	raw	resample to Friday / last	Z(60)
+IWM_SPY_REL20	IWM/SPY 20日相对收益	up_good	relret20	Friday close	MADZ(40)
+2.4 US observers
+
+Hard veto (either or both enabled):
+
+HY_OAS_JUMP: “extreme jump” rule (ΔZ(2w) > +1.5) OR score ≤ 40 → red candidate
+
+VIX_EXTREME: Z > +2.0 OR score ≤ 40 → red candidate
+
+Soft confirm (weights sum to 1.0):
+
+IWM_SPY_SOFT (single) → 0.30
+
+HYG_IEF_SOFT (single) → 0.30
+
+PAIR_TWEX_DXY (pair) → 0.20
+
+PAIR_CNH_CNY (pair) → 0.20
+
+3) Standardization & scoring
+
+Direction unify: Z = sign * (X - μ)/σ, where sign=+1 (up_good), -1 (down_good).
+
+Z type:
+
+Z(60): rolling mean/std (60 trading days)
+
+MADZ(60/40/90): robust Z via median & MAD (1.4826 factor)
+
+VIX: apply log then winsorize to 2%–98% before Z.
+
+Score mapping: Score = clamp(50 + 10*Z, 0, 100)
+
+4) Regime (per market, daily & weekly)
+
+Thresholds: Attack ≥ 70, Defense ≤ 40, otherwise Balanced.
+
+Crossing confirmation: daily view optional persistence_days=3 (default 0), weekly view persistence_weeks=1.
+
+5) Confirm layer (per market, daily & weekly)
+
+Single-lamp color from score: score ≥ 60 → Green, ≤ 40 → Red, else Yellow.
+
+Hard veto combine: MIN (red wins) with persistence:
+
+daily: persistence_days=3 (configurable)
+
+weekly: persistence_weeks=2
+
+Pair-combine rule (for CNH/CNY, TWEX/DXY) — Rule A (Consistency-first):
+
+both Green → Green; both Red → Red; else Yellow.
+(Provide Rule B as alternate in code: “strong divergence makes Red”)
+
+Soft confirm weighted vote: map Green=2, Yellow=1, Red=0 → weighted average S
+
+Thresholds: S ≥ 1.6 → Green; S ≤ 0.8 → Red; else Yellow.
+
+Final Lamp: if HardVeto==Red → Red; else if SoftConfirm==Green → Green; else Yellow.
+
+6) GUI requirements
+
+Left control panel:
+
+Date range picker; toggle Daily / Weekly view.
+
+Market toggles: CN, US.
+
+Regime thresholds (70 / 40), persistence (daily & weekly separately).
+
+Z windows (40/60/90), EWMA λ (for margin slope), winsor percentiles for VIX.
+
+Style weights: dropdown Attack / Balanced / Defense (per market); editable weight table.
+
+Soft-confirm weights editable; pair-rule A/B selector.
+
+Data source config: FRED key, proxies; CSV import buttons (CN margin, northbound share, ETF netflow, PMI, CN EPS yield, CGB10).
+
+Buttons: “Fetch & Update Daily”, “Fetch & Update Weekly (Fri)”, “Recompute Only”, “Export Charts (PNG)”, “Export Scores (CSV/Excel)”, “Backup DB”.
+
+Right main area with tabs:
+
+CN Overview (Daily/Weekly)
+
+Top: Regime badge (Attack/Balanced/Defense) + Final Lamp (Green/Yellow/Red) for the selected date (cursor at end).
+
+Center chart: CN Score timeline (0–100) with horizontal lines at 70/40; background color bands by regime; a lower strip showing Final Lamp colors per day/week.
+
+Subcharts (selectable):
+
+For each CN main indicator: a two-axis chart: Raw series (left y) + Score (right y); show Z (as thin line) is a plus. Lines at 60/40 on score axis.
+
+For CN observers: show raw & score; for pairs，显示两条个体灯色+组合灯。
+
+US Overview (Daily/Weekly) (同 CN)
+
+Indicator Table (CN & US): current values, Z, Score, Direction, Weights, In-Scoring flag, Missing flags。
+
+Confirm Layer Panel: show Hard Veto, Soft Confirm, Final Lamp per day/week as color bands; show persistence windows.
+
+Logs: fetch status, errors, last updated timestamps.
+
+Chart interactions: pan/zoom, hover values, export current figure to PNG.
+
+7) Data fetching
+
+FRED: RRPONTSYD, WTREGEN (TGA), DFII10, BAMLH0A0HYM2, DTWEXBGS, NFCI (optional)
+
+yfinance: ^VIX, CNH=X, CNY=X, IWM, SPY, HYG, IEF，以及沪深指数替代（若无则以 CSV 导入中证1000/沪深300收盘）
+
+CSV import (mandatory fallback for CN specifics): margin balance, northbound turnover share, ETF 5d netflow, PMI new orders yoy std, CN EPS yield, CGB10
+
+All series unified to daily business day index; weekly = Friday label.
+
+8) Persistence (SQLite + SQLAlchemy)
+
+Models:
+
+series_meta(id, code, name, market, role[main|soft|hard|pair], direction, transform, source[fred|yf|csv|manual], note)
+
+series_data(id, series_id, date, value_raw, value_tr, z, score, view['daily'|'weekly'])
+
+regimes(id, date, market['CN'|'US'], view, regime['Attack'|'Balanced'|'Defense'], lamp_final['G'|'Y'|'R'], lamp_soft['G'|'Y'|'R'], lamp_hard['G'|'Y'|'R'], params_hash)
+
+params(id, json_blob, updated_at)
+
+fetch_log(id, ts, action, status, message)
+
+Repository must support:
+
+upsert by (series_id, date, view)
+
+load ranges for plotting efficiently
+
+save/load params JSON
+
+9) Scoring & transforms API (pure functions for tests)
+
+transform_delta20(series), transform_pct20(series), transform_relret20(a, b),
+transform_slope_20_60_ewma(series, w_fast=0.6, w_slow=0.4, lmbd=0.94),
+transform_log_winsor(series, p_low=0.02, p_high=0.98)
+
+rolling_z(series, window=60, method='z'|'madz')
+
+score_from_z(z) -> 0..100
+
+regime_from_score(score, up=70, down=40, persistence_days/weeks)
+
+lamp_from_score(score, up=60, down=40)
+
+pair_combine(c1, c2, rule='A'|'B') -> {'G','Y','R'}
+
+hard_veto(min_of_colors_with_persistence)
+
+soft_confirm_weighted(colors: List['G','Y','R'], weights: List[float], green=1.6, red=0.8)
+
+final_lamp(hard, soft)
+
+Provide unit tests for all above.
+
+10) Defaults (preload in core/config.py)
+
+Regime thresholds: attack=70, defense=40
+
+Lamp thresholds: green=60, red=40
+
+Persistence: daily regime=3 days (default 0 allowed), weekly regime=1 week; hard-veto persistence: daily 3 days, weekly 2 weeks
+
+Z windows: base 60, fast 40, slow 90; VIX winsor (0.02, 0.98)
+
+Style weights (per market, three presets: Attack / Balanced / Defense)
+
+CN:
+
+Attack: 24/16/12/20/16/12 (按表 CN main 顺序)
+
+Balanced: 20/14/12/18/18/18
+
+Defense: 15/10/10/12/20/33
+
+US:
+
+Attack: 12/8/18/16/16/30
+
+Balanced: 15/10/20/15/20/20
+
+Defense: 18/12/24/18/28/0
+
+Soft-confirm weights (US view): IWM/SPY 0.30, HYG/IEF 0.30, PAIR_TWEX_DXY 0.20, PAIR_CNH_CNY 0.20
+
+Soft-confirm weights (CN view): PAIR_CNH_CNY 0.50, PAIR_TWEX_DXY 0.50
+
+Pair rule: default Rule A (Consistency-first)
+
+11) UX details
+
+In each indicator chart, show BOTH raw & score: raw on left y-axis; score on right y-axis; draw horizontal lines at 60 & 40 on the score axis.
+
+In Overview charts (CN & US), color the background by regime; add a bottom ribbon showing Final Lamp color day by day (or week by week).
+
+Provide a right-click menu to export current chart to PNG and to copy current parameters as JSON.
+
+12) Acceptance criteria
+
+First run: create DB, load defaults, fetch last 2 years of FRED & yfinance data; missing CN series can be CSV-imported; app still runs with partial data.
+
+Toggle Daily/Weekly instantly recomputes & updates all charts and CN/US Overview badges + lamp ribbons.
+
+Each indicator tab shows raw + score simultaneously; threshold lines at 60/40 visible.
+
+Confirm layer works: Hard veto uses MIN + persistence; Soft confirm uses weighted average & pair-combine rule; Final lamp follows logic.
+
+Parameters persist across sessions in DB; export/import JSON works.
+
+Export PNG/CSV OK; logs show last fetch status; no crashes if network is down (use cached DB).
+
+13) Dependencies
+pyqt6
+matplotlib
+pandas
+numpy
+yfinance
+fredapi
+SQLAlchemy
+python-dotenv
+scipy
+akshare  # optional

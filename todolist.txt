@@ -1,0 +1,581 @@
+我来为您制定一个分步执行的开发计划。这个计划将项目分解为多个可独立测试的阶段，每个阶段完成后都能验证功能正常再继续。
+
+# 双市场温度计 - 分步开发计划
+
+## 📋 总体策略
+采用**自底向上**的开发方式，先构建核心逻辑（可纯函数测试），再添加数据层，最后构建UI层。每个阶段都有明确的测试验证点。
+
+---
+
+## 🔷 阶段 1：项目初始化和基础配置
+**目标**：建立项目骨架，配置开发环境
+
+### 任务清单
+- [ ] 创建项目目录结构
+- [ ] 创建 `requirements.txt` 或 `pyproject.toml`
+- [ ] 创建 `.env.example` 和配置加载模块
+- [ ] 实现 `core/config.py`（默认参数、JSON保存/加载）
+- [ ] 创建基础 `README.md`
+
+### 测试验证
+```powershell
+# 安装依赖
+pip install -r requirements.txt
+
+# 测试配置加载
+python -c "from core.config import Config; c=Config(); print(c.get_defaults())"
+```
+
+### 预期输出
+- 目录结构完整
+- 能成功导入配置模块
+- 打印出默认参数（regime阈值、权重等）
+
+---
+
+## 🔷 阶段 2：核心转换和评分逻辑（纯函数）
+**目标**：实现所有数据转换和评分算法，完全独立于数据源和UI
+
+### 任务清单
+- [ ] 实现 `core/transforms.py`
+  - `transform_delta20()`, `transform_pct20()`
+  - `transform_relret20()`
+  - `transform_slope_20_60_ewma()`
+  - `transform_log_winsor()`
+- [ ] 实现 `core/scoring.py`
+  - `rolling_z()`, `rolling_madz()`
+  - `score_from_z()`
+  - `lamp_from_score()`
+  - `regime_from_score()`
+- [ ] 创建 `tests/test_transforms.py` 和 `tests/test_scoring.py`
+
+### 测试验证
+```powershell
+# 运行单元测试
+python -m pytest tests/test_transforms.py -v
+python -m pytest tests/test_scoring.py -v
+
+# 手动测试示例
+python -c "
+import pandas as pd
+import numpy as np
+from core.transforms import transform_delta20
+from core.scoring import rolling_z, score_from_z
+
+# 生成测试数据
+dates = pd.date_range('2024-01-01', periods=100, freq='B')
+values = pd.Series(np.random.randn(100).cumsum(), index=dates)
+
+# 测试转换
+delta = transform_delta20(values)
+print('Delta20 前5个值:', delta.head())
+
+# 测试评分
+z = rolling_z(values, window=60)
+scores = score_from_z(z)
+print('Scores 前5个值:', scores.head())
+"
+```
+
+### 预期输出
+- 所有单元测试通过
+- 能够正确计算各种转换和Z分数
+- Score在0-100范围内
+
+---
+
+## 🔷 阶段 3：确认层逻辑（Confirm Layer）
+**目标**：实现软确认、硬否决、灯色组合逻辑
+
+### 任务清单
+- [ ] 实现 `core/combine.py`
+  - `pair_combine()` (Rule A 和 Rule B)
+  - `hard_veto()` (MIN + persistence)
+  - `soft_confirm_weighted()`
+  - `final_lamp()`
+- [ ] 创建 `tests/test_combine.py`
+
+### 测试验证
+```powershell
+python -m pytest tests/test_combine.py -v
+
+# 手动测试
+python -c "
+from core.combine import pair_combine, soft_confirm_weighted, final_lamp
+
+# 测试配对组合
+print('两个绿灯:', pair_combine('G', 'G', rule='A'))
+print('一红一绿:', pair_combine('R', 'G', rule='A'))
+
+# 测试软确认
+colors = ['G', 'G', 'Y', 'R']
+weights = [0.3, 0.3, 0.2, 0.2]
+print('加权投票:', soft_confirm_weighted(colors, weights))
+
+# 测试最终灯色
+print('硬否决为红时:', final_lamp('R', 'G'))
+print('硬否决为黄时:', final_lamp('Y', 'G'))
+"
+```
+
+### 预期输出
+- 配对规则正确（两绿→绿，两红→红，其他→黄）
+- 加权投票逻辑正确（≥1.6绿，≤0.8红）
+- 硬否决优先级正确
+
+---
+
+## 🔷 阶段 4：数据存储层（SQLite + SQLAlchemy）
+**目标**：实现数据库模型和CRUD操作
+
+### 任务清单
+- [ ] 实现 `storage/models.py`
+  - SeriesMeta, SeriesData, Regimes, Params, FetchLog
+- [ ] 实现 `storage/repository.py`
+  - upsert操作
+  - 查询时间范围数据
+  - 保存/加载参数
+- [ ] 实现 `storage/migrate.py`（初始化数据库）
+- [ ] 创建 `tests/test_repo.py`
+
+### 测试验证
+```powershell
+# 初始化数据库
+python -c "from storage.migrate import init_db; init_db('test.db')"
+
+# 测试仓库操作
+python -m pytest tests/test_repo.py -v
+
+# 手动测试
+python -c "
+from storage.repository import Repository
+import pandas as pd
+import datetime
+
+repo = Repository('test.db')
+
+# 添加指标元数据
+meta_id = repo.add_series_meta(
+    code='TEST_IND',
+    name='测试指标',
+    market='CN',
+    role='main',
+    direction='up_good'
+)
+print(f'创建指标 ID: {meta_id}')
+
+# 保存数据
+dates = pd.date_range('2024-01-01', periods=10, freq='B')
+for date in dates:
+    repo.upsert_series_data(
+        series_id=meta_id,
+        date=date,
+        value_raw=100.0,
+        view='daily'
+    )
+
+# 读取数据
+data = repo.load_series_data(meta_id, view='daily')
+print(f'读取到 {len(data)} 条数据')
+"
+```
+
+### 预期输出
+- 数据库文件创建成功
+- 能够插入和查询数据
+- 参数能够持久化
+
+---
+
+## 🔷 阶段 5：数据获取模块
+**目标**：实现从FRED、yfinance获取数据，以及CSV导入
+
+### 任务清单
+- [ ] 实现 `core/datasource.py`
+  - `FREDFetcher` (RRPONTSYD, TGA, DFII10, HY_OAS, DTWEXBGS)
+  - `YFinanceFetcher` (^VIX, CNH=X, CNY=X, IWM, SPY, HYG, IEF)
+  - `CSVImporter` (CN特有数据)
+- [ ] 实现 `core/scheduler.py`（协调获取和计算）
+
+### 测试验证
+```powershell
+# 测试FRED（需要.env中配置FRED_API_KEY）
+python -c "
+from core.datasource import FREDFetcher
+from datetime import datetime, timedelta
+
+fetcher = FREDFetcher()
+end_date = datetime.now()
+start_date = end_date - timedelta(days=30)
+
+data = fetcher.fetch('RRPONTSYD', start_date, end_date)
+print(f'获取到 {len(data)} 天的RRP数据')
+print(data.tail())
+"
+
+# 测试yfinance
+python -c "
+from core.datasource import YFinanceFetcher
+from datetime import datetime, timedelta
+
+fetcher = YFinanceFetcher()
+end_date = datetime.now()
+start_date = end_date - timedelta(days=30)
+
+data = fetcher.fetch('^VIX', start_date, end_date)
+print(f'获取到 {len(data)} 天的VIX数据')
+print(data.tail())
+"
+
+# 测试CSV导入
+python -c "
+from core.datasource import CSVImporter
+
+# 创建测试CSV
+import pandas as pd
+test_data = pd.DataFrame({
+    'date': pd.date_range('2024-01-01', periods=5, freq='B'),
+    'value': [100, 102, 101, 103, 105]
+})
+test_data.to_csv('test_import.csv', index=False)
+
+importer = CSVImporter()
+data = importer.import_csv('test_import.csv', date_col='date', value_col='value')
+print(f'导入 {len(data)} 条数据')
+print(data)
+"
+```
+
+### 预期输出
+- 能够从FRED获取真实数据
+- 能够从yfinance获取真实数据
+- CSV导入正常工作
+- 错误处理正确（网络故障时不崩溃）
+
+---
+
+## 🔷 阶段 6：完整数据流水线集成
+**目标**：将获取→转换→评分→存储连接起来
+
+### 任务清单
+- [ ] 完善 `core/scheduler.py`
+  - `update_daily_pipeline()` (CN市场)
+  - `update_daily_pipeline()` (US市场)
+  - `update_weekly_pipeline()`
+- [ ] 实现端到端数据流
+
+### 测试验证
+```powershell
+# 运行完整流水线（CN市场部分指标）
+python -c "
+from core.scheduler import Scheduler
+from storage.repository import Repository
+from datetime import datetime, timedelta
+
+repo = Repository('market_thermo.db')
+scheduler = Scheduler(repo)
+
+# 更新最近30天的US数据（测试）
+result = scheduler.update_market_daily(
+    market='US',
+    start_date=datetime.now() - timedelta(days=30),
+    end_date=datetime.now()
+)
+print('更新结果:', result)
+
+# 检查数据库
+vix_data = repo.load_series_data_by_code('VIX_LOG', view='daily')
+print(f'VIX数据条数: {len(vix_data)}')
+print(vix_data.tail())
+"
+```
+
+### 预期输出
+- 数据成功获取并存入数据库
+- 转换后的值正确
+- Z分数和Score计算正确
+- Regime和Lamp状态正确
+
+---
+
+## 🔷 阶段 7：基础GUI框架（无图表）
+**目标**：建立PyQt6窗口结构和控制面板
+
+### 任务清单
+- [ ] 实现 `ui/main_window.py`
+  - 主窗口框架
+  - 标签页容器（CN Overview, US Overview, 指标表格，日志）
+- [ ] 实现 `ui/panels.py`
+  - 左侧控制面板（日期选择、市场切换、参数编辑）
+  - 按钮（更新、重算、导出）
+- [ ] 实现 `app.py`（主入口）
+
+### 测试验证
+```powershell
+# 启动应用
+python app.py
+```
+
+### 预期输出
+- 窗口正常打开
+- 左侧控制面板布局正确
+- 右侧标签页切换正常
+- 按钮响应（先用打印测试，不实际执行）
+- 参数可以修改并保存
+
+---
+
+## 🔷 阶段 8：图表可视化（matplotlib集成）
+**目标**：实现所有图表组件
+
+### 任务清单
+- [ ] 实现 `ui/charts.py`
+  - `OverviewChart`（Score时间线 + 背景regime + 底部lamp带）
+  - `IndicatorChart`（双Y轴：raw + score，带阈值线）
+  - `ConfirmLayerChart`（显示软硬确认和最终灯色）
+- [ ] 集成到标签页
+
+### 测试验证
+```powershell
+# 启动应用并查看图表
+python app.py
+
+# 在Python控制台测试单个图表
+python -c "
+from PyQt6.QtWidgets import QApplication
+from ui.charts import OverviewChart
+import pandas as pd
+import numpy as np
+import sys
+
+app = QApplication(sys.argv)
+
+# 创建测试数据
+dates = pd.date_range('2024-01-01', periods=100, freq='B')
+scores = pd.Series(50 + 20*np.sin(np.linspace(0, 4*np.pi, 100)), index=dates)
+regimes = pd.Series(['Attack']*30 + ['Balanced']*40 + ['Defense']*30, index=dates)
+lamps = pd.Series(['G']*30 + ['Y']*40 + ['R']*30, index=dates)
+
+# 显示图表
+chart = OverviewChart()
+chart.plot(scores, regimes, lamps)
+chart.show()
+
+sys.exit(app.exec())
+"
+```
+
+### 预期输出
+- Overview图表显示正确：
+  - Score曲线
+  - 背景色按regime分段
+  - 底部lamp颜色带
+  - 阈值线（70/40）
+- Indicator图表双Y轴正确
+- 图表可交互（缩放、平移）
+
+---
+
+## 🔷 阶段 9：表格视图和数据展示
+**目标**：实现指标表格和确认层面板
+
+### 任务清单
+- [ ] 实现 `ui/tables.py`
+  - `IndicatorTableView`（显示所有指标当前值、Z、Score）
+  - `ParamsTableView`（可编辑参数）
+- [ ] 实现确认层面板
+- [ ] 实现日志面板
+
+### 测试验证
+```powershell
+python app.py
+# 在GUI中：
+# 1. 查看"指标表格"标签页
+# 2. 检查所有CN和US指标是否显示
+# 3. 编辑参数表格并保存
+# 4. 查看日志标签页
+```
+
+### 预期输出
+- 表格显示所有指标的实时数据
+- 可以按列排序
+- 参数可编辑并持久化
+- 日志显示最近操作
+
+---
+
+## 🔷 阶段 10：日视图和周视图切换
+**目标**：实现Daily/Weekly视图的动态切换
+
+### 任务清单
+- [ ] 实现周数据重采样逻辑（Friday标签）
+- [ ] 连接Daily/Weekly切换按钮
+- [ ] 更新所有图表和表格以响应视图切换
+
+### 测试验证
+```powershell
+python app.py
+# 在GUI中：
+# 1. 点击"Weekly"单选按钮
+# 2. 检查所有图表是否更新为周数据
+# 3. 检查X轴标签是否为Friday
+# 4. 切回"Daily"确认恢复
+```
+
+### 预期输出
+- 切换视图时所有图表即时更新
+- 周视图仅显示Friday数据
+- persistence参数正确应用（日视图3天，周视图2周）
+
+---
+
+## 🔷 阶段 11：完整功能集成和数据更新
+**目标**：连接所有按钮功能
+
+### 任务清单
+- [ ] 实现"Fetch & Update Daily"按钮
+- [ ] 实现"Fetch & Update Weekly"按钮
+- [ ] 实现"Recompute Only"按钮
+- [ ] 实现导出功能（PNG、CSV、Excel）
+- [ ] 实现备份数据库功能
+- [ ] 添加进度条和错误提示
+
+### 测试验证
+```powershell
+python app.py
+# 测试流程：
+# 1. 点击"Fetch & Update Daily" - 观察进度和日志
+# 2. 确认数据已更新（查看图表和表格）
+# 3. 修改参数后点击"Recompute Only"
+# 4. 导出图表到PNG
+# 5. 导出数据到Excel
+# 6. 备份数据库
+```
+
+### 预期输出
+- 数据获取有进度反馈
+- 更新后图表自动刷新
+- 导出文件格式正确
+- 数据库备份成功
+- 网络错误时使用缓存数据，不崩溃
+
+---
+
+## 🔷 阶段 12：CN市场完整支持
+**目标**：添加所有CN特有指标和CSV导入
+
+### 任务清单
+- [ ] 实现CN_MARGIN_SLOPE计算
+- [ ] 添加CSV导入UI（两融余额、北向成交占比等）
+- [ ] 实现CN的确认层逻辑
+- [ ] 测试CN市场完整流水线
+
+### 测试验证
+```powershell
+# 准备CN测试CSV文件
+python -c "
+import pandas as pd
+import numpy as np
+
+# 生成模拟CN数据
+dates = pd.date_range('2023-01-01', '2024-12-31', freq='B')
+
+# 两融余额
+margin = pd.DataFrame({
+    'date': dates,
+    'balance': 16000 + np.random.randn(len(dates)).cumsum() * 10
+})
+margin.to_csv('cn_margin_balance.csv', index=False)
+
+# 北向成交占比
+north = pd.DataFrame({
+    'date': dates,
+    'ratio': 0.08 + np.random.randn(len(dates)) * 0.01
+})
+north.to_csv('cn_north_ratio.csv', index=False)
+
+print('CN测试数据已生成')
+"
+
+python app.py
+# 在GUI中导入CSV并验证CN市场功能
+```
+
+### 预期输出
+- CSV导入成功
+- CN指标计算正确（特别是margin slope）
+- CN Overview显示完整
+- CN确认层工作正常
+
+---
+
+## 🔷 阶段 13：高级功能和优化
+**目标**：完善用户体验
+
+### 任务清单
+- [ ] 右键菜单（导出当前图表、复制参数JSON）
+- [ ] 图表悬停显示数值
+- [ ] 添加图标和资源文件
+- [ ] 性能优化（大数据量加载）
+- [ ] 异常处理完善
+- [ ] 添加工具提示和帮助文档
+
+### 测试验证
+```powershell
+python app.py
+# 全面测试：
+# 1. 在图表上右键导出
+# 2. 鼠标悬停查看数值
+# 3. 测试2年历史数据加载速度
+# 4. 故意制造错误（断网、错误CSV）查看处理
+```
+
+---
+
+## 🔷 阶段 14：最终测试和文档
+**目标**：全面测试和完善文档
+
+### 任务清单
+- [ ] 首次运行测试（空数据库）
+- [ ] 完整2年数据测试
+- [ ] 所有参数调整测试
+- [ ] 更新README（安装、配置、使用说明）
+- [ ] 创建示例CSV文件
+- [ ] 性能和内存测试
+
+### 测试验证
+```powershell
+# 删除旧数据库，完全重新开始
+Remove-Item market_thermo.db -ErrorAction Ignore
+
+# 首次运行
+python app.py
+
+# 按照README操作完整流程
+```
+
+### 预期输出
+- 新用户能按照README完成配置
+- 所有功能正常
+- 无内存泄漏
+- 响应流畅
+
+---
+
+## 📊 开发进度跟踪建议
+
+每完成一个阶段，创建一个git commit或checkpoint：
+
+```powershell
+git add .
+git commit -m "阶段X完成: [功能描述]"
+```
+
+## ⚠️ 关键注意事项
+
+1. **先测试核心逻辑**（阶段2-3）：这些是纯函数，最容易测试和调试
+2. **数据层要稳定**（阶段4）：后续所有功能依赖它
+3. **逐步添加数据源**（阶段5）：先测试一个API，再添加其他
+4. **GUI最后完善**（阶段7-9）：核心逻辑稳定后UI开发会很快
+5. **每个阶段都保持可运行状态**：不要跳步骤
+

@@ -1,0 +1,350 @@
+{
+  "regime": {
+    "attack_threshold": 75,
+    "defense_threshold": 40,
+    "persistence_days": 0,
+    "persistence_weeks": 1
+  },
+  "lamp": {
+    "green_threshold": 60,
+    "red_threshold": 40
+  },
+  "z_windows": {
+    "base": 60,
+    "fast": 40,
+    "slow": 90
+  },
+  "transforms": {
+    "ewma_lambda": 0.94,
+    "slope_w_fast": 0.6,
+    "slope_w_slow": 0.4,
+    "vix_winsor_low": 0.02,
+    "vix_winsor_high": 0.98
+  },
+  "persistence": {
+    "hard_veto_days": 3,
+    "hard_veto_weeks": 2
+  },
+  "soft_confirm_weights": {
+    "CN": {
+      "PAIR_CNH_CNY": 0.5,
+      "PAIR_TWEX_DXY": 0.5
+    },
+    "US": {
+      "IWM_SPY_SOFT": 0.3,
+      "HYG_IEF_SOFT": 0.3,
+      "PAIR_TWEX_DXY": 0.2,
+      "PAIR_CNH_CNY": 0.2
+    }
+  },
+  "soft_confirm_thresholds": {
+    "green": 1.6,
+    "red": 0.8
+  },
+  "pair_rule": "A",
+  "style_weights": {
+    "CN": {
+      "Attack": [
+        24,
+        16,
+        12,
+        20,
+        16,
+        12
+      ],
+      "Balanced": [
+        20,
+        14,
+        12,
+        18,
+        18,
+        18
+      ],
+      "Defense": [
+        15,
+        10,
+        10,
+        12,
+        20,
+        33
+      ]
+    },
+    "US": {
+      "Attack": [
+        12,
+        8,
+        18,
+        16,
+        16,
+        30
+      ],
+      "Balanced": [
+        15,
+        10,
+        20,
+        15,
+        20,
+        20
+      ],
+      "Defense": [
+        18,
+        12,
+        24,
+        18,
+        28,
+        0
+      ]
+    }
+  },
+  "active_style": {
+    "CN": "Balanced",
+    "US": "Balanced"
+  },
+  "hard_veto_rules": {
+    "CN": {
+      "ETF_NETFLOW_5D": {
+        "enabled": true,
+        "threshold": null
+      }
+    },
+    "US": {
+      "HY_OAS_JUMP": {
+        "enabled": true,
+        "delta_z_threshold": 1.5,
+        "score_threshold": 40
+      },
+      "VIX_EXTREME": {
+        "enabled": true,
+        "z_threshold": 2.0,
+        "score_threshold": 40
+      }
+    }
+  },
+  "data_sources": {
+    "fred_api_key": "",
+    "use_proxy": false,
+    "http_proxy": "",
+    "https_proxy": ""
+  },
+  "database": {
+    "path": "market_thermo.db"
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "market_thermo.log"
+  },
+  "indicators": {
+    "CN": {
+      "main": [
+        {
+          "code": "CN_MARGIN_SLOPE",
+          "name": "两融余额斜率(20/60 EWMA)",
+          "direction": "up_good",
+          "transform": "slope_20_60_ewma",
+          "z_type": "Z",
+          "z_window": 60,
+          "source": "csv"
+        },
+        {
+          "code": "CNH_PCT20",
+          "name": "USD/CNH 20日%变动",
+          "direction": "down_good",
+          "transform": "pct20",
+          "z_type": "MADZ",
+          "z_window": 60,
+          "source": "yfinance",
+          "ticker": "CNH=X"
+        },
+        {
+          "code": "NORTH_TURNOVER_SHARE",
+          "name": "北向成交额/全A成交额",
+          "direction": "up_good",
+          "transform": "raw",
+          "z_type": "MADZ",
+          "z_window": 60,
+          "source": "csv"
+        },
+        {
+          "code": "CSI1000_OVER_300_REL20",
+          "name": "中证1000/沪深300 20日相对收益",
+          "direction": "up_good",
+          "transform": "relret20",
+          "z_type": "MADZ",
+          "z_window": 40,
+          "source": "csv"
+        },
+        {
+          "code": "PMI_NEWORDER_YOY_STD",
+          "name": "官方PMI新订单同比标准化",
+          "direction": "up_good",
+          "transform": "yoy_std_ffill",
+          "z_type": "Z",
+          "z_window": 90,
+          "source": "csv"
+        },
+        {
+          "code": "CN_EPS_YIELD_MINUS_CGB10",
+          "name": "股债收益差（盈利收益率-10Y国债）",
+          "direction": "up_good",
+          "transform": "raw_winsor",
+          "z_type": "Z",
+          "z_window": 60,
+          "source": "csv"
+        }
+      ],
+      "observers": [
+        {
+          "code": "ETF_NETFLOW_5D",
+          "name": "宽基ETF 5日净申赎",
+          "role": "hard",
+          "direction": "up_good",
+          "transform": "raw",
+          "source": "csv"
+        },
+        {
+          "code": "CNH",
+          "name": "USD/CNH",
+          "role": "pair",
+          "pair_id": "PAIR_CNH_CNY",
+          "direction": "down_good",
+          "transform": "raw",
+          "source": "yfinance",
+          "ticker": "CNH=X"
+        },
+        {
+          "code": "CNY",
+          "name": "USD/CNY",
+          "role": "pair",
+          "pair_id": "PAIR_CNH_CNY",
+          "direction": "down_good",
+          "transform": "raw",
+          "source": "yfinance",
+          "ticker": "CNY=X"
+        },
+        {
+          "code": "DTWEXBGS",
+          "name": "Trade-Weighted USD",
+          "role": "pair",
+          "pair_id": "PAIR_TWEX_DXY",
+          "direction": "down_good",
+          "transform": "raw",
+          "source": "fred",
+          "ticker": "DTWEXBGS"
+        },
+        {
+          "code": "DXY",
+          "name": "DXY美元指数",
+          "role": "pair",
+          "pair_id": "PAIR_TWEX_DXY",
+          "direction": "down_good",
+          "transform": "raw",
+          "source": "yfinance",
+          "ticker": "DX-Y.NYB"
+        }
+      ]
+    },
+    "US": {
+      "main": [
+        {
+          "code": "RRP_D20",
+          "name": "RRP Δ20d",
+          "direction": "down_good",
+          "transform": "delta20",
+          "z_type": "Z",
+          "z_window": 60,
+          "source": "fred",
+          "ticker": "RRPONTSYD"
+        },
+        {
+          "code": "TGA_D20",
+          "name": "TGA Δ20d",
+          "direction": "down_good",
+          "transform": "delta20",
+          "z_type": "Z",
+          "z_window": 60,
+          "source": "fred",
+          "ticker": "WTREGEN"
+        },
+        {
+          "code": "HY_OAS",
+          "name": "高收益债利差",
+          "direction": "down_good",
+          "transform": "raw",
+          "z_type": "MADZ",
+          "z_window": 60,
+          "source": "fred",
+          "ticker": "BAMLH0A0HYM2"
+        },
+        {
+          "code": "VIX_LOG",
+          "name": "VIX (log & winsor)",
+          "direction": "down_good",
+          "transform": "log_winsor",
+          "z_type": "MADZ",
+          "z_window": 40,
+          "source": "yfinance",
+          "ticker": "^VIX"
+        },
+        {
+          "code": "DFII10",
+          "name": "10Y TIPS实际利率",
+          "direction": "down_good",
+          "transform": "raw",
+          "z_type": "Z",
+          "z_window": 60,
+          "source": "fred",
+          "ticker": "DFII10"
+        },
+        {
+          "code": "IWM_SPY_REL20",
+          "name": "IWM/SPY 20日相对收益",
+          "direction": "up_good",
+          "transform": "relret20",
+          "z_type": "MADZ",
+          "z_window": 40,
+          "source": "yfinance",
+          "ticker": [
+            "IWM",
+            "SPY"
+          ]
+        }
+      ],
+      "observers": [
+        {
+          "code": "HY_OAS_JUMP",
+          "name": "高收益债极端跳升",
+          "role": "hard",
+          "base_indicator": "HY_OAS",
+          "rule": "jump_or_low_score"
+        },
+        {
+          "code": "VIX_EXTREME",
+          "name": "VIX极端值",
+          "role": "hard",
+          "base_indicator": "VIX_LOG",
+          "rule": "extreme_z_or_low_score"
+        },
+        {
+          "code": "IWM_SPY_SOFT",
+          "name": "IWM/SPY软确认",
+          "role": "soft",
+          "base_indicator": "IWM_SPY_REL20"
+        },
+        {
+          "code": "HYG_IEF_SOFT",
+          "name": "HYG/IEF相对强度",
+          "role": "soft",
+          "direction": "up_good",
+          "transform": "relret20",
+          "z_type": "MADZ",
+          "z_window": 40,
+          "source": "yfinance",
+          "ticker": [
+            "HYG",
+            "IEF"
+          ]
+        }
+      ]
+    }
+  }
+}
