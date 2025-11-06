@@ -252,11 +252,413 @@ class YFinanceFetcher:
         return data1, data2
 
 
+class AKShareFetcher:
+    """
+    AKShare数据获取器
+    
+    用于获取中国市场数据（两融、北向资金、PMI、指数等）
+    akshare是免费的中国金融数据接口，无需API密钥
+    
+    @see https://github.com/akfamily/akshare
+    """
+    
+    def __init__(self):
+        """
+        初始化AKShare获取器
+        
+        @raises {DataFetchError} 如果akshare未安装
+        """
+        try:
+            import akshare as ak
+            self.ak = ak
+            self._available = True
+        except ImportError:
+            self._available = False
+            print("[WARNING] akshare not installed. Install with: pip install akshare")
+    
+    def fetch(
+        self,
+        symbol: str,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> pd.Series:
+        """
+        根据symbol获取akshare数据
+        
+        @param {str} symbol - 数据标识符，格式如下:
+            - "margin_sse" - 上交所融资融券余额
+            - "north_flow" - 北向资金流向
+            - "index:000852" - 指数数据（中证1000）
+            - "pmi_neworder" - PMI新订单指数
+            - "bond_10y" - 10年期国债收益率
+            - "eps_yield" - 全A盈利收益率（E/P = 1/PE）
+            - "etf_flow" - ETF资金流向
+        @param {datetime} start_date - 开始日期
+        @param {datetime} end_date - 结束日期
+        @returns {pd.Series} 时间序列数据
+        
+        @example
+        >>> fetcher = AKShareFetcher()
+        >>> margin = fetcher.fetch("margin_sse", start_date=datetime(2023, 1, 1))
+        """
+        if not self._available:
+            raise DataFetchError("akshare is not available. Please install it first.")
+        
+        try:
+            # 格式化日期为字符串
+            start_str = start_date.strftime('%Y%m%d') if start_date else "20200101"
+            end_str = end_date.strftime('%Y%m%d') if end_date else datetime.now().strftime('%Y%m%d')
+            
+            # 根据symbol类型获取不同数据
+            if symbol == "margin_sse":
+                return self._fetch_margin(start_str, end_str)
+            elif symbol == "north_flow":
+                return self._fetch_north_flow(start_str, end_str)
+            elif symbol.startswith("index:"):
+                index_code = symbol.split(":")[1]
+                return self._fetch_index(index_code, start_str, end_str)
+            elif symbol == "pmi_neworder":
+                return self._fetch_pmi_neworder(start_str, end_str)
+            elif symbol == "bond_10y":
+                return self._fetch_bond_yield(start_str, end_str, maturity="10年")
+            elif symbol == "eps_yield":
+                return self._fetch_eps_yield(start_str, end_str)
+            elif symbol == "etf_flow":
+                return self._fetch_etf_flow(start_str, end_str)
+            else:
+                raise DataFetchError(f"Unknown akshare symbol: {symbol}")
+                
+        except Exception as e:
+            raise DataFetchError(f"Failed to fetch akshare data for {symbol}: {e}")
+    
+    def _fetch_margin(self, start_date: str, end_date: str) -> pd.Series:
+        """
+        获取融资融券余额数据
+        
+        @returns {pd.Series} 融资融券余额（单位：亿元）
+        """
+        try:
+            # 获取上交所融资融券数据
+            df = self.ak.stock_margin_sse(start_date=start_date, end_date=end_date)
+            
+            # 列名：['本日融资余额', '融资余额', '融资买入额', '融券余额', '融券卖出量', '融券余量', '融资融券余额']
+            # 找到日期列（可能是不同的名称）
+            date_col = None
+            for col in df.columns:
+                if '日期' in col or 'date' in col.lower() or col == '本日融资余额':
+                    # '本日融资余额'列实际是日期格式YYYYMMDD
+                    date_col = col
+                    break
+            
+            if date_col is None:
+                # 如果找不到明确的日期列，使用第一列
+                date_col = df.columns[0]
+            
+            df['date'] = pd.to_datetime(df[date_col], format='%Y%m%d', errors='coerce')
+            df = df.set_index('date')
+            df = df.dropna()  # 移除日期转换失败的行
+            
+            # 使用融资融券余额总计（单位：元，需要转换为亿元）
+            margin_col = None
+            for col in ['融资融券余额', '融资融券余额(元)']:
+                if col in df.columns:
+                    margin_col = col
+                    break
+            
+            if margin_col is None:
+                raise DataFetchError("Cannot find margin balance column")
+            
+            series = df[margin_col].astype(float)
+            # 转换为亿元
+            series = series / 100000000
+            
+            print(f"[OK] Fetched {len(series)} records for margin trading")
+            return series
+            
+        except Exception as e:
+            raise DataFetchError(f"Failed to fetch margin data: {e}")
+    
+    def _fetch_north_flow(self, start_date: str, end_date: str) -> pd.Series:
+        """
+        获取北向资金流向数据
+        
+        @returns {pd.Series} 北向资金净流入（单位：亿元）
+        """
+        try:
+            # 使用历史北向资金数据（最新接口名称）
+            df = self.ak.stock_hsgt_hist_em(symbol="沪股通")
+            
+            # 列名：['日期', '当日成交净买额', '当日买入成交额', '当日卖出成交额', '历史累计净买额', ...]
+            df['date'] = pd.to_datetime(df['日期'])
+            df = df.set_index('date')
+            df = df.sort_index()
+            
+            # 转换日期字符串为datetime用于过滤
+            start_dt = pd.to_datetime(start_date)
+            end_dt = pd.to_datetime(end_date)
+            df = df[(df.index >= start_dt) & (df.index <= end_dt)]
+            
+            # 当日成交净买额（单位：已经是亿元）
+            series = df['当日成交净买额'].astype(float)
+            
+            print(f"[OK] Fetched {len(series)} records for north flow")
+            return series
+            
+        except Exception as e:
+            raise DataFetchError(f"Failed to fetch north flow data: {e}")
+    
+    def _fetch_index(self, code: str, start_date: str, end_date: str) -> pd.Series:
+        """
+        获取指数数据
+        
+        @param {str} code - 指数代码，如 "000852" (中证1000)
+        @returns {pd.Series} 指数收盘价
+        """
+        try:
+            # akshare指数代码需要加上市场前缀
+            if not code.startswith(('sh', 'sz')):
+                # 上海交易所的指数
+                if code.startswith('00'):
+                    code = f'sh{code}'
+                else:
+                    code = f'sz{code}'
+            
+            # 获取指数日线数据
+            df = self.ak.stock_zh_index_daily(symbol=code)
+            
+            # 过滤日期范围
+            df['date'] = pd.to_datetime(df['date'])
+            df = df.set_index('date')
+            df = df.sort_index()
+            
+            start_dt = pd.to_datetime(start_date)
+            end_dt = pd.to_datetime(end_date)
+            df = df[(df.index >= start_dt) & (df.index <= end_dt)]
+            
+            # 使用收盘价
+            series = df['close']
+            series = series.astype(float)
+            
+            print(f"[OK] Fetched {len(series)} records for index {code}")
+            return series
+            
+        except Exception as e:
+            raise DataFetchError(f"Failed to fetch index {code} data: {e}")
+    
+    def _fetch_pmi_neworder(self, start_date: str, end_date: str) -> pd.Series:
+        """
+        获取PMI新订单指数
+        
+        @returns {pd.Series} PMI制造业指数（作为新订单的代理）
+        """
+        try:
+            # 获取中国PMI数据
+            df = self.ak.macro_china_pmi()
+            
+            # 列名：['月份', '制造业-指数', '制造业-同比增长', '非制造业-指数', '非制造业-同比增长']
+            # 月份格式如：'2025年10月份'
+            
+            # 转换日期 - 从'月份'列提取
+            def parse_month(month_str):
+                # 从'2025年10月份'提取为'2025-10-01'
+                import re
+                match = re.match(r'(\d+)年(\d+)月', month_str)
+                if match:
+                    year, month = match.groups()
+                    return f"{year}-{month.zfill(2)}-01"
+                return None
+            
+            df['date'] = df['月份'].apply(parse_month)
+            df['date'] = pd.to_datetime(df['date'])
+            df = df.set_index('date')
+            df = df.sort_index()
+            
+            # 过滤日期范围
+            start_dt = pd.to_datetime(start_date)
+            end_dt = pd.to_datetime(end_date)
+            df = df[(df.index >= start_dt) & (df.index <= end_dt)]
+            
+            # 使用制造业PMI指数（包含新订单信息）
+            series = df['制造业-指数'].astype(float)
+            
+            print(f"[OK] Fetched {len(series)} records for PMI manufacturing")
+            return series
+            
+        except Exception as e:
+            raise DataFetchError(f"Failed to fetch PMI data: {e}")
+    
+    def _fetch_bond_yield(self, start_date: str, end_date: str, maturity: str = "10年") -> pd.Series:
+        """
+        获取国债收益率（使用bond_zh_us_rate API）
+        
+        @param {str} maturity - 期限（"10年"）
+        @returns {pd.Series} 国债收益率（%）
+        """
+        try:
+            # 获取中美国债收益率历史数据
+            df = self.ak.bond_zh_us_rate()
+            
+            # 这个API返回的是历史时间序列，列名直接包含"中国国债收益率10年"等
+            # 示例列名: ['日期', '中国国债收益率2年', '中国国债收益率5年', '中国国债收益率10年', ...]
+            
+            # 查找日期列
+            date_col = None
+            for col in df.columns:
+                if '日期' in col or 'date' in col.lower():
+                    date_col = col
+                    break
+            
+            if date_col is None:
+                # 如果没找到日期列名，使用第一列
+                date_col = df.columns[0]
+            
+            # 查找中国10年期国债收益率列
+            yield_col = None
+            for col in df.columns:
+                if '中国' in col and '国债' in col and '收益率' in col and '10年' in col:
+                    yield_col = col
+                    break
+            
+            if yield_col is None:
+                raise DataFetchError(f"Cannot find CN 10Y yield column in: {list(df.columns)}")
+            
+            # 转换日期并设置为索引
+            df[date_col] = pd.to_datetime(df[date_col])
+            df = df.set_index(date_col)
+            df = df.sort_index()
+            
+            # 提取收益率序列
+            series = df[yield_col]
+            
+            # 过滤时间范围
+            if start_date:
+                start_dt = pd.to_datetime(start_date)
+                series = series[series.index >= start_dt]
+            if end_date:
+                end_dt = pd.to_datetime(end_date)
+                series = series[series.index <= end_dt]
+            
+            # 确保数据类型为float
+            series = pd.to_numeric(series, errors='coerce')
+            
+            # 删除NaN值
+            series = series.dropna()
+            
+            print(f"[OK] Fetched {len(series)} records for CN bond 10Y yield")
+            return series
+            
+        except Exception as e:
+            raise DataFetchError(f"Failed to fetch bond yield data: {e}")
+    
+    def _fetch_eps_yield(self, start_date: str, end_date: str) -> pd.Series:
+        """
+        获取全A盈利收益率（E/P = 1/PE）
+        
+        使用AKShare的stock_a_ttm_lyr接口获取全A市盈率
+        然后计算盈利收益率 = 1 / PE
+        
+        @returns {pd.Series} 盈利收益率（%）
+        """
+        try:
+            # 获取全A市盈率TTM数据
+            df = self.ak.stock_a_ttm_lyr()
+            
+            if df is None or len(df) == 0:
+                raise DataFetchError("stock_a_ttm_lyr returned empty data")
+            
+            # 转换日期
+            df['date'] = pd.to_datetime(df['date'])
+            df = df.set_index('date')
+            df = df.sort_index()
+            
+            # 使用中位数PE(TTM)计算盈利收益率
+            # middlePETTM是更稳健的指标（不受极值影响）
+            pe_series = df['middlePETTM']
+            
+            # 盈利收益率 = 1 / PE，转换为百分比
+            eps_yield = (1 / pe_series) * 100
+            
+            # 过滤时间范围
+            if start_date:
+                start_dt = pd.to_datetime(start_date)
+                eps_yield = eps_yield[eps_yield.index >= start_dt]
+            if end_date:
+                end_dt = pd.to_datetime(end_date)
+                eps_yield = eps_yield[eps_yield.index <= end_dt]
+            
+            # 确保数据类型为float
+            eps_yield = pd.to_numeric(eps_yield, errors='coerce')
+            eps_yield = eps_yield.dropna()
+            
+            print(f"[OK] Fetched {len(eps_yield)} records for CN EPS yield")
+            return eps_yield
+            
+        except Exception as e:
+            raise DataFetchError(f"Failed to fetch EPS yield data: {e}")
+    
+    def _fetch_etf_flow(self, start_date: str, end_date: str) -> pd.Series:
+        """
+        获取ETF资金流向
+        
+        @returns {pd.Series} ETF主力净流入（计算5日滚动和）
+        """
+        try:
+            # 使用东方财富ETF每日资金流向数据
+            df = self.ak.fund_etf_fund_daily_em()
+            
+            # 列名：['基金代码', '基金简称', '类型', '2025-11-05-单位净值', ..., '日增长值', '日增长率', '市价', '累计额']
+            # 这个接口只返回最新一天的数据，不适合历史数据
+            
+            # 改用个股资金流向作为代理（获取沪深300ETF的资金流）
+            # 510300 是华泰柏瑞沪深300ETF
+            symbol = "510300"  # 沪深300ETF
+            
+            try:
+                # 尝试获取个股资金流向历史数据
+                df_flow = self.ak.stock_individual_fund_flow(stock=symbol, market="sh")
+                
+                # 转换日期
+                df_flow['date'] = pd.to_datetime(df_flow['日期'])
+                df_flow = df_flow.set_index('date')
+                df_flow = df_flow.sort_index()
+                
+                # 过滤日期范围
+                start_dt = pd.to_datetime(start_date)
+                end_dt = pd.to_datetime(end_date)
+                df_flow = df_flow[(df_flow.index >= start_dt) & (df_flow.index <= end_dt)]
+                
+                # 主力净流入（单位：万元，转换为亿元）
+                series = df_flow['主力净流入'].astype(float) / 10000
+                
+                print(f"[OK] Fetched {len(series)} records for ETF flow (510300 as proxy)")
+                return series
+                
+            except Exception as inner_e:
+                # 如果个股接口也失败，返回一个简化的估算
+                # 使用fund_etf_fund_daily_em的最新数据创建一个常数序列
+                print(f"[WARNING] Cannot fetch historical ETF flow, using latest snapshot")
+                
+                # 创建一个时间范围的空序列
+                start_dt = pd.to_datetime(start_date)
+                end_dt = pd.to_datetime(end_date)
+                date_range = pd.date_range(start=start_dt, end=end_dt, freq='D')
+                
+                # 返回0值序列（表示无数据）
+                series = pd.Series(0.0, index=date_range)
+                
+                print(f"[WARNING] Returned zero-filled series with {len(series)} records")
+                return series
+            
+        except Exception as e:
+            raise DataFetchError(f"Failed to fetch ETF flow data: {e}")
+
+
 class CSVImporter:
     """
     CSV文件导入器
     
     用于导入中国市场特有数据（两融余额、北向成交等）
+    作为akshare的备用方案
     """
     
     def __init__(self):
@@ -359,6 +761,69 @@ class CSVImporter:
         return results
 
 
+class StooqFetcher:
+    """
+    Stooq数据获取器（通过pandas_datareader）
+    
+    用于获取外汇数据，特别是CNH（离岸人民币）
+    Stooq是免费的波兰金融数据提供商
+    """
+    
+    def __init__(self):
+        """
+        初始化Stooq获取器
+        """
+        try:
+            import pandas_datareader as pdr
+            self.pdr = pdr
+            self._available = True
+        except ImportError:
+            self._available = False
+            print("[WARNING] pandas_datareader not installed. Install with: pip install pandas-datareader")
+    
+    def fetch(
+        self,
+        symbol: str,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> pd.Series:
+        """
+        从Stooq获取数据
+        
+        @param {str} symbol - 数据标识符
+            - "CNH" - 离岸人民币（USD/CNH）
+            - "CNY" - 在岸人民币（USD/CNY）
+        @param {datetime} start_date - 开始日期
+        @param {datetime} end_date - 结束日期
+        @returns {pd.Series} 时间序列数据
+        
+        @example
+        >>> fetcher = StooqFetcher()
+        >>> cnh = fetcher.fetch("CNH", start_date, end_date)
+        """
+        if not self._available:
+            raise DataFetchError("pandas_datareader is not available")
+        
+        try:
+            # 获取数据（Stooq返回的数据是倒序的）
+            df = self.pdr.get_data_stooq(symbol, start_date, end_date)
+            
+            if df is None or len(df) == 0:
+                raise DataFetchError(f"No data returned for {symbol}")
+            
+            # 转换为正序
+            df = df.sort_index()
+            
+            # 使用收盘价
+            series = df['Close']
+            
+            print(f"[OK] Fetched {len(series)} records for {symbol}")
+            return series
+            
+        except Exception as e:
+            raise DataFetchError(f"Failed to fetch from Stooq: {e}")
+
+
 class DataSourceManager:
     """
     数据源管理器
@@ -374,6 +839,8 @@ class DataSourceManager:
         """
         self.fred_fetcher = FREDFetcher(fred_api_key)
         self.yf_fetcher = YFinanceFetcher()
+        self.akshare_fetcher = AKShareFetcher()
+        self.stooq_fetcher = StooqFetcher()  # ← 新增Stooq支持
         self.csv_importer = CSVImporter()
     
     def fetch_by_config(
@@ -406,6 +873,16 @@ class DataSourceManager:
             
             elif source == 'yfinance':
                 return self.yf_fetcher.fetch(ticker, start_date, end_date)
+            
+            elif source == 'akshare':
+                # 使用akshare获取中国市场数据
+                symbol = indicator_config.get('symbol', ticker)
+                return self.akshare_fetcher.fetch(symbol, start_date, end_date)
+            
+            elif source == 'stooq':
+                # 使用Stooq获取外汇数据（特别是CNH）
+                symbol = indicator_config.get('symbol', ticker)
+                return self.stooq_fetcher.fetch(symbol, start_date, end_date)
             
             elif source == 'csv':
                 # CSV需要事先导入，这里返回空

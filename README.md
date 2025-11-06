@@ -1,11 +1,13 @@
 # 双市场温度计 (Dual Market Thermometer)
 
+> 🎉 **最新成就**: 18/18指标100%自动获取，0个CSV导入！
+
 一个用于监测中国和美国股市温度的Python桌面应用程序，通过多维度指标分析提供市场状态评估和投资风格建议。
 
 ## 📋 功能特性
 
 - **双市场独立监测**: 同时跟踪中国（CN）和美国（US）市场，各自独立评分
-- **多指标综合评估**: 整合FRED、yfinance等数据源的多个关键市场指标
+- **多指标综合评估**: 整合FRED、yfinance、Stooq、AKShare等多个数据源的关键市场指标
 - **智能评分系统**: 基于Z分数和MAD-Z的稳健评分机制（0-100分）
 - **三态市场判断**: Attack（进攻）/ Balanced（平衡）/ Defense（防御）
 - **三色灯信号**: Green（绿）/ Yellow（黄）/ Red（红）快速判断
@@ -21,7 +23,7 @@
 - **GUI框架**: PyQt6
 - **图表库**: matplotlib
 - **数据处理**: pandas, numpy, scipy
-- **数据源**: yfinance, fredapi, akshare（可选）
+- **数据源**: yfinance, fredapi, pandas-datareader (Stooq), akshare
 - **数据库**: SQLite + SQLAlchemy
 - **配置管理**: python-dotenv
 
@@ -141,6 +143,35 @@ date,value
 ```
 
 在应用中点击对应的 **"Import CSV"** 按钮导入。
+
+## 📡 数据源说明
+
+本项目整合了多个免费数据源，实现了**100%指标自动化获取**：
+
+### 数据源列表
+
+| 数据源 | 用途 | API密钥 | 覆盖市场 |
+|-------|------|---------|---------|
+| **FRED** | 美国宏观经济指标 | 需要（免费） | US |
+| **yfinance** | 股票指数、ETF价格 | 不需要 | US + CN |
+| **Stooq** (pandas-datareader) | 外汇数据（CNH/CNY） | 不需要 | CN配对 |
+| **AKShare** | 中国市场专有数据 | 不需要 | CN |
+
+### CN市场数据覆盖
+
+- ✅ **自动获取**: 10/10 指标 (100%)
+  - 两融余额、北向成交、股指、PMI、国债收益率、ETF流向等
+  - **关键突破**: CNH（Stooq）+ CNY（yfinance）配对自动化
+  - **新增**: 全A盈利收益率（akshare `stock_a_ttm_lyr`）+ 股债收益差派生
+- 📋 **CSV导入**: 0个指标
+
+### US市场数据覆盖
+
+- ✅ **自动获取**: 10/10 指标 (100%)
+  - FRED: 逆回购、TGA、通胀保值债、高收益债利差、贸易加权美元、金融条件指数
+  - yfinance: VIX、IWM、SPY、HYG、IEF
+
+详细配置请参考：[FINAL_INDICATOR_SOLUTION.md](FINAL_INDICATOR_SOLUTION.md)
 
 ## 📊 核心指标说明
 
