@@ -177,7 +177,8 @@ class Config:
                             "transform": "slope_20_60_ewma",
                             "z_type": "Z",
                             "z_window": 60,
-                            "source": "csv"
+                            "source": "akshare",
+                            "symbol": "margin_sse"
                         },
                         {
                             "code": "CNH_PCT20",
@@ -186,8 +187,9 @@ class Config:
                             "transform": "pct20",
                             "z_type": "MADZ",
                             "z_window": 60,
-                            "source": "yfinance",
-                            "ticker": "CNH=X"
+                            "source": "stooq",
+                            "symbol": "CNH",
+                            "ticker": "CNH"
                         },
                         {
                             "code": "NORTH_TURNOVER_SHARE",
@@ -196,7 +198,8 @@ class Config:
                             "transform": "raw",
                             "z_type": "MADZ",
                             "z_window": 60,
-                            "source": "csv"
+                            "source": "akshare",
+                            "symbol": "north_flow"
                         },
                         {
                             "code": "CSI1000_OVER_300_REL20",
@@ -205,7 +208,8 @@ class Config:
                             "transform": "relret20",
                             "z_type": "MADZ",
                             "z_window": 40,
-                            "source": "csv"
+                            "source": "akshare",
+                            "symbol": ["index:000852", "index:000300"]
                         },
                         {
                             "code": "PMI_NEWORDER_YOY_STD",
@@ -214,7 +218,8 @@ class Config:
                             "transform": "yoy_std_ffill",
                             "z_type": "Z",
                             "z_window": 90,
-                            "source": "csv"
+                            "source": "akshare",
+                            "symbol": "pmi_neworder"
                         },
                         {
                             "code": "CN_EPS_YIELD_MINUS_CGB10",
@@ -223,7 +228,20 @@ class Config:
                             "transform": "raw_winsor",
                             "z_type": "Z",
                             "z_window": 60,
-                            "source": "csv"
+                            "derived": True,
+                            "components": [
+                                {
+                                    "code": "CN_EPS_YIELD",
+                                    "source": "akshare",
+                                    "symbol": "eps_yield"
+                                },
+                                {
+                                    "code": "CN_BOND_10Y",
+                                    "source": "akshare",
+                                    "symbol": "bond_10y"
+                                }
+                            ],
+                            "calculation": "CN_EPS_YIELD - CN_BOND_10Y"
                         }
                     ],
                     "observers": [
@@ -233,47 +251,18 @@ class Config:
                             "role": "hard",
                             "direction": "up_good",
                             "transform": "raw",
-                            "source": "csv"
-                        },
-                        {
-                            "code": "CNH",
-                            "name": "USD/CNH",
-                            "role": "pair",
-                            "pair_id": "PAIR_CNH_CNY",
-                            "direction": "down_good",
-                            "transform": "raw",
-                            "source": "yfinance",
-                            "ticker": "CNH=X"
+                            "source": "akshare",
+                            "symbol": "etf_flow"
                         },
                         {
                             "code": "CNY",
-                            "name": "USD/CNY",
+                            "name": "USD/CNY (配对用)",
                             "role": "pair",
                             "pair_id": "PAIR_CNH_CNY",
                             "direction": "down_good",
-                            "transform": "raw",
+                            "transform": "pct20",
                             "source": "yfinance",
                             "ticker": "CNY=X"
-                        },
-                        {
-                            "code": "DTWEXBGS",
-                            "name": "Trade-Weighted USD",
-                            "role": "pair",
-                            "pair_id": "PAIR_TWEX_DXY",
-                            "direction": "down_good",
-                            "transform": "raw",
-                            "source": "fred",
-                            "ticker": "DTWEXBGS"
-                        },
-                        {
-                            "code": "DXY",
-                            "name": "DXY美元指数",
-                            "role": "pair",
-                            "pair_id": "PAIR_TWEX_DXY",
-                            "direction": "down_good",
-                            "transform": "raw",
-                            "source": "yfinance",
-                            "ticker": "DX-Y.NYB"
                         }
                     ]
                 },
@@ -371,6 +360,35 @@ class Config:
                             "z_window": 40,
                             "source": "yfinance",
                             "ticker": ["HYG", "IEF"]
+                        },
+                        {
+                            "code": "PAIR_TWEX_DXY",
+                            "name": "TWEX/DXY配对",
+                            "role": "soft",
+                            "pair": True,
+                            "components": [
+                                {
+                                    "code": "DTWEXBGS",
+                                    "source": "fred",
+                                    "ticker": "DTWEXBGS",
+                                    "direction": "down_good"
+                                },
+                                {
+                                    "code": "DXY",
+                                    "source": "yfinance",
+                                    "ticker": "DX-Y.NYB",
+                                    "direction": "down_good"
+                                }
+                            ],
+                            "rule": "A"
+                        },
+                        {
+                            "code": "PAIR_CNH_CNY",
+                            "name": "CNH/CNY配对",
+                            "role": "soft",
+                            "pair": True,
+                            "note": "CNH来自CN主指标，CNY来自CN观察者",
+                            "rule": "A"
                         }
                     ]
                 }

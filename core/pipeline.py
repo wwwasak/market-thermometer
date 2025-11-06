@@ -197,6 +197,105 @@ class MarketPipeline:
         
         return transformed
     
+    def calculate_derived_indicators(
+        self,
+        base_data: Dict[str, pd.Series],
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> Dict[str, pd.Series]:
+        """
+        计算派生指标
+        
+        @param {Dict[str, pd.Series]} base_data - 基础数据（已转换）
+        @param {Optional[datetime]} start_date - 开始日期
+        @param {Optional[datetime]} end_date - 结束日期
+        @returns {Dict[str, pd.Series]} 包含派生指标的完整数据
+        """
+        print(f"\n[INFO] 计算派生指标...")
+        
+        result = base_data.copy()
+        derived_count = 0
+        
+        for indicator in self.indicators:
+            code = indicator['code']
+            
+            # 跳过非派生指标
+            if not indicator.get('derived', False):
+                continue
+            
+            components = indicator.get('components', [])
+            calculation = indicator.get('calculation', '')
+            
+            if not components or not calculation:
+                print(f"[SKIP] {code} - 缺少组件或计算公式")
+                continue
+            
+            try:
+                print(f"[DERIVE] {code} ({indicator.get('name', '')})...")
+                
+                # 获取组件数据
+                component_data = {}
+                for comp in components:
+                    comp_code = comp['code']
+                    comp_source = comp['source']
+                    comp_symbol = comp['symbol']
+                    
+                    # 获取组件数据
+                    if comp_code not in result:
+                        print(f"  [FETCH] 组件 {comp_code}...")
+                        comp_config = {
+                            'code': comp_code,
+                            'source': comp_source,
+                            'symbol': comp_symbol
+                        }
+                        comp_series = self.data_source.fetch_by_config(comp_config, start_date, end_date)
+                        
+                        if len(comp_series) > 0:
+                            component_data[comp_code] = comp_series
+                            result[comp_code] = comp_series  # 保存组件数据
+                            print(f"    [OK] {len(comp_series)} 条记录")
+                        else:
+                            print(f"    [FAIL] 未获取到数据")
+                            raise Exception(f"组件 {comp_code} 数据获取失败")
+                    else:
+                        component_data[comp_code] = result[comp_code]
+                
+                # 计算派生指标
+                # 解析计算公式并执行（简单的减法）
+                if '-' in calculation:
+                    parts = calculation.split('-')
+                    var1 = parts[0].strip()
+                    var2 = parts[1].strip()
+                    
+                    if var1 in component_data and var2 in component_data:
+                        # 对齐时间序列
+                        series1 = component_data[var1]
+                        series2 = component_data[var2]
+                        
+                        # 对齐索引
+                        common_idx = series1.index.intersection(series2.index)
+                        derived_series = series1.loc[common_idx] - series2.loc[common_idx]
+                        
+                        # 应用转换（如winsor）
+                        transform = indicator.get('transform', 'raw')
+                        if transform != 'raw':
+                            derived_series = apply_transform(derived_series, transform)
+                        
+                        result[code] = derived_series
+                        derived_count += 1
+                        print(f"  [OK] 计算完成: {len(derived_series)} 条记录")
+                    else:
+                        print(f"  [FAIL] 缺少必要的组件数据")
+                else:
+                    print(f"  [WARN] 不支持的计算公式: {calculation}")
+            
+            except Exception as e:
+                print(f"  [ERROR] {code} 计算失败: {e}")
+        
+        print(f"[OK] 完成 {derived_count} 个派生指标的计算")
+        
+        return result
+    
     def calculate_scores(
         self,
         transformed_data: Dict[str, pd.Series],
@@ -480,6 +579,9 @@ class MarketPipeline:
             # 2. 转换数据
             transformed_data = self.transform_data(raw_data)
             
+            # 2.5 计算派生指标
+            transformed_data = self.calculate_derived_indicators(transformed_data, start_date, end_date)
+            
             # 3. 计算评分
             scores = self.calculate_scores(transformed_data, view_type='daily')
             
@@ -546,6 +648,7 @@ class MarketPipeline:
                 raise PipelineError("No data fetched")
             
             transformed_data = self.transform_data(raw_data)
+            transformed_data = self.calculate_derived_indicators(transformed_data, start_date, end_date)
             scores = self.calculate_scores(transformed_data, view_type='weekly')
             confirm_results = self.apply_confirm_layer(scores, view_type='weekly')
             
