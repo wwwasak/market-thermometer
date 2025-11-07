@@ -514,11 +514,23 @@ class MarketPipeline:
                     ticker=indicator.get('ticker', '')
                 )
         
+        # 准备code到series_id的映射
+        code_to_series_id: Dict[str, int] = {}
+        for indicator in self.indicators:
+            code = indicator['code']
+            meta = self.repository.get_series_meta_by_code(code)
+            if meta and 'id' in meta:
+                code_to_series_id[code] = meta['id']
+
         # 2. 保存时间序列数据
         for code in raw_data.keys():
             if code not in transformed_data:
                 continue
             
+            series_id = code_to_series_id.get(code)
+            if series_id is None:
+                continue
+
             raw_series = raw_data[code]
             trans_series = transformed_data[code]
             
@@ -541,19 +553,19 @@ class MarketPipeline:
                         z_val = scores.loc[date, z_col]
                     
                     self.repository.upsert_series_data(
-                        code=code,
+                        series_id=series_id,
                         date=date.to_pydatetime(),
-                        raw_value=float(raw_series.loc[date]),
-                        transformed_value=float(trans_series.loc[date]),
-                        z_score=float(z_val) if pd.notna(z_val) else None,
-                        score=float(score_val) if pd.notna(score_val) else None,
-                        view_type=view_type
+                        view=view_type,
+                        value_raw=float(raw_series.loc[date]) if pd.notna(raw_series.loc[date]) else None,
+                        value_tr=float(trans_series.loc[date]) if pd.notna(trans_series.loc[date]) else None,
+                        z=float(z_val) if pd.notna(z_val) else None,
+                        score=float(score_val) if pd.notna(score_val) else None
                     )
                     
                     total_saved += 1
                 
                 except Exception as e:
-                    # 跳过单个错误
+                    print(f"[WARN] 保存 {code} 数据失败: {e}")
                     continue
         
         # 3. 保存Regime数据
