@@ -201,10 +201,14 @@ def transform_yoy_std_ffill(
         standardized = (yoy_diff - mean_val) / std_val
     else:
         standardized = yoy_diff - mean_val
-    
-    # 前向填充（假设调用者会重采样到日频）
-    # 这里只返回标准化结果，填充由调用者处理
-    return standardized
+
+    standardized = standardized.dropna()
+    if len(standardized) == 0:
+        return standardized
+
+    # 前向填充到工作日频率
+    daily_series = forward_fill_to_daily(standardized)
+    return daily_series
 
 
 def transform_raw_winsor(

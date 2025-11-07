@@ -80,6 +80,18 @@ class MarketPipeline:
         self.last_update = None
         self.data_cache = {}
     
+    @staticmethod
+    def _ensure_naive_series(series: pd.Series) -> pd.Series:
+        if not isinstance(series, pd.Series):
+            return series
+        idx = series.index
+        if isinstance(idx, pd.DatetimeIndex):
+            if idx.tz is not None:
+                series = series.copy()
+                series.index = idx.tz_convert('UTC').tz_localize(None)
+            series = series.sort_index()
+        return series
+
     def fetch_all_data(
         self,
         start_date: Optional[datetime] = None,
@@ -180,15 +192,16 @@ class MarketPipeline:
                 continue
             
             transform = indicator.get('transform', 'raw')
-            series = raw_data[code]
+            series = self._ensure_naive_series(raw_data[code])
             
             try:
                 if transform == 'raw':
-                    transformed[code] = series
+                    transformed_series = series
                 else:
-                    # 应用转换
-                    transformed[code] = apply_transform(series, transform)
+                    transformed_series = apply_transform(series, transform)
                     print(f"[TRANSFORM] {code}: {transform}")
+
+                transformed[code] = self._ensure_naive_series(transformed_series)
             
             except Exception as e:
                 print(f"[ERROR] {code} 转换失败: {e}")
@@ -251,6 +264,7 @@ class MarketPipeline:
                         comp_series = self.data_source.fetch_by_config(comp_config, start_date, end_date)
                         
                         if len(comp_series) > 0:
+                            comp_series = self._ensure_naive_series(comp_series)
                             component_data[comp_code] = comp_series
                             result[comp_code] = comp_series  # 保存组件数据
                             print(f"    [OK] {len(comp_series)} 条记录")
@@ -281,6 +295,7 @@ class MarketPipeline:
                         if transform != 'raw':
                             derived_series = apply_transform(derived_series, transform)
                         
+                        derived_series = self._ensure_naive_series(derived_series)
                         result[code] = derived_series
                         derived_count += 1
                         print(f"  [OK] 计算完成: {len(derived_series)} 条记录")
@@ -310,26 +325,28 @@ class MarketPipeline:
         """
         print(f"\n[INFO] 计算 {view_type} 评分...")
         
-        # 对齐所有序列到共同的日期索引
+        # 对齐所有序列到统一的日期索引（取并集）
         codes_list = list(transformed_data.keys())
         series_list = [transformed_data[code] for code in codes_list if len(transformed_data[code]) > 0]
-        
+
         if not series_list:
             raise PipelineError("No valid data for scoring")
-        
-        # 找到所有序列的共同日期索引
-        common_dates = series_list[0].index
+
+        all_dates = series_list[0].index
         for s in series_list[1:]:
-            common_dates = common_dates.intersection(s.index)
-        
-        if len(common_dates) == 0:
-            raise PipelineError("No common dates between series")
-        
-        # 创建DataFrame，保留DatetimeIndex
+            all_dates = all_dates.union(s.index)
+
+        if len(all_dates) == 0:
+            raise PipelineError("No dates available for scoring")
+
+        all_dates = pd.to_datetime(all_dates, utc=True)
+        all_dates = all_dates.tz_localize(None)
+        all_dates = all_dates.sort_values()
+
         df = pd.DataFrame({
-            code: transformed_data[code].loc[common_dates]
+            code: transformed_data[code].reindex(all_dates)
             for code in codes_list if code in transformed_data
-        }, index=common_dates)
+        }, index=all_dates)
         
         # 如果是周度，重采样
         if view_type == 'weekly':
@@ -384,51 +401,76 @@ class MarketPipeline:
         """
         print(f"\n[INFO] 应用 {view_type} 确认层...")
         
-        # 将评分转换为灯号
-        lamps = {}
-        
+        # 将评分转换为灯号（按指标代码）
+        indicator_lamps: Dict[str, pd.Series] = {}
         green_th = self.market_config.get('green_threshold', 60)
         red_th = self.market_config.get('red_threshold', 40)
-        
-        for code in scores.columns:
-            if code.endswith('_score'):
-                lamp_code = code.replace('_score', '_lamp')
-                lamps[lamp_code] = lamp_from_score(scores[code], green_th, red_th)
-        
-        # 获取确认层配置
-        confirm_config = self.market_config.get('confirm_layer', {})
-        
-        # 主指标灯号
-        main_lamps = {code: lamp for code, lamp in lamps.items() if '_lamp' in code}
-        
-        # Hard veto 指标（这里简化处理，实际需要根据配置）
-        hard_veto_lamps = []
-        
-        # Soft confirm 指标
-        soft_confirm_lamps = list(main_lamps.values())
-        soft_weights = [1.0] * len(soft_confirm_lamps)  # 简化为等权重
-        
-        # 持久化参数
-        persistence_daily = confirm_config.get('persistence_daily', 3)
-        persistence_weekly = confirm_config.get('persistence_weekly', 2)
-        
-        # 应用确认层
+
+        for indicator in self.indicators:
+            code = indicator['code']
+            score_col = f"{code}_score"
+            if score_col in scores.columns:
+                indicator_lamps[code] = lamp_from_score(scores[score_col], green_th, red_th)
+
+        # 按角色区分灯号
+        main_lamps: Dict[str, pd.Series] = {}
+        observer_lamps: Dict[str, pd.Series] = {}
+        pair_lamps: Dict[str, Tuple[pd.Series, pd.Series]] = {}
+
+        for indicator in self.indicators:
+            code = indicator['code']
+            role = indicator.get('role', 'main')
+
+            if indicator.get('pair'):
+                components = indicator.get('components', [])
+                if len(components) == 2:
+                    comp_lamps = []
+                    for comp in components:
+                        comp_code = comp.get('code')
+                        if comp_code in indicator_lamps:
+                            comp_lamps.append(indicator_lamps[comp_code])
+                    if len(comp_lamps) == 2:
+                        pair_lamps[code] = (comp_lamps[0], comp_lamps[1])
+                continue
+
+            lamp_series = indicator_lamps.get(code)
+            if lamp_series is None:
+                continue
+
+            if role in ['hard', 'soft', 'pair']:
+                observer_lamps[code] = lamp_series
+            else:
+                main_lamps[code] = lamp_series
+
+        confirm_config = self.market_config.get('confirm_layer', {}) or {}
+
+        config_params = {
+            'hard_veto_codes': confirm_config.get('hard_veto_codes', []),
+            'hard_veto_persistence': confirm_config.get('hard_veto_persistence', 3 if view_type == 'daily' else 0),
+            'soft_confirm_codes': confirm_config.get('soft_confirm_codes', []),
+            'soft_confirm_weights': confirm_config.get('soft_confirm_weights', {}),
+            'soft_confirm_green': confirm_config.get('soft_confirm_green', 1.6),
+            'soft_confirm_red': confirm_config.get('soft_confirm_red', 0.8),
+            'pair_rule': confirm_config.get('pair_rule', 'A')
+        }
+
         try:
             result = build_confirm_layer(
-                main_indicator_lamps=main_lamps,
-                hard_veto_lamps=hard_veto_lamps,
-                soft_confirm_lamps=soft_confirm_lamps,
-                soft_weights=soft_weights,
-                pair_rules={},
-                persistence_daily=persistence_daily if view_type == 'daily' else 0,
-                persistence_weekly=persistence_weekly if view_type == 'weekly' else 0,
-                view_type=view_type
+                main_lamps=main_lamps,
+                observer_lamps=observer_lamps,
+                pair_lamps=pair_lamps,
+                config=config_params
             )
-            
+
             print(f"[OK] 确认层计算完成")
-            
-            return result
-        
+
+            return {
+                'hard_veto_lamp': result.get('hard_veto'),
+                'soft_confirm_lamp': result.get('soft_confirm'),
+                'final_lamp': result.get('final'),
+                'pair_lamps': result.get('pairs', {})
+            }
+
         except Exception as e:
             print(f"[ERROR] 确认层失败: {e}")
             return {}

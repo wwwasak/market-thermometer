@@ -32,7 +32,7 @@ python-dotenv==1.0.0
 scipy==1.11.4
 
 # CN市场数据
-akshare>=1.17.0
+akshare>=1.17.82
 
 # 开发和测试
 pytest==7.4.3

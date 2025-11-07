@@ -254,47 +254,501 @@ print(data)
 
 ---
 
-## 🔷 阶段 6：完整数据流水线集成
-**目标**：将获取→转换→评分→存储连接起来
+## 🔷 阶段 6：完整数据流水线集成 + 增量数据库完善
+**目标**：将获取→转换→评分→存储连接起来，完善增量数据库设计，确保所有原始和派生数据持久化
 
-### 任务清单
-- [ ] 完善 `core/scheduler.py`
-  - `update_daily_pipeline()` (CN市场)
-  - `update_daily_pipeline()` (US市场)
-  - `update_weekly_pipeline()`
-- [ ] 实现端到端数据流
+### 6.1 数据库Schema完善
 
-### 测试验证
+#### 任务清单
+- [ ] **扩展 `storage/models.py`**，添加完整的数据存储模型：
+  
+  **SeriesMeta**（指标元数据）- 已有，需补充字段：
+  - `last_raw_date`: 最新原始数据日期（用于增量更新）
+  - `last_updated`: 最后更新时间戳
+  - `data_quality`: 数据质量标记（'complete', 'partial', 'missing'）
+  - `fetch_frequency`: 更新频率（'daily', 'weekly', 'monthly'）
+  
+  **SeriesData**（时间序列数据）- 扩展字段：
+  ```python
+  # 原有字段
+  series_id, date, view ('daily'|'weekly')
+  # 新增/确认字段
+  value_raw          # 原始获取值（FRED/yfinance/CSV）
+  value_transformed  # 转换后的值（delta20/pct20/slope等）
+  z_score            # Z分数或MADZ分数
+  score_0_100        # 0-100分数
+  lamp_color         # 单指标灯色 ('G'|'Y'|'R'|NULL)
+  is_derived         # 是否派生数据（周数据从日数据派生）
+  ```
+  
+  **ConfirmLayer**（确认层详细数据）- **新增表**：
+  ```python
+  id, date, market ('CN'|'US'), view ('daily'|'weekly')
+  # 软确认组件
+  soft_iwm_spy_lamp       # IWM/SPY灯色（US）
+  soft_hyg_ief_lamp       # HYG/IEF灯色（US）
+  soft_twex_dxy_lamp      # TWEX/DXY配对灯色（US+CN）
+  soft_cnh_cny_lamp       # CNH/CNY配对灯色（US+CN）
+  soft_weighted_score     # 软确认加权分数
+  soft_final_lamp         # 软确认最终灯色
+  # 硬否决组件
+  hard_etf_netflow_lamp   # ETF净流入灯色（CN）
+  hard_hy_oas_jump_lamp   # HY OAS跳跃灯色（US）
+  hard_vix_extreme_lamp   # VIX极值灯色（US）
+  hard_veto_lamp          # 硬否决MIN结果
+  # 最终结果
+  final_lamp              # 最终灯色（硬否决优先）
+  params_hash             # 参数哈希（用于重算检测）
+  ```
+  
+  **Regimes**（市场状态）- 扩展字段：
+  ```python
+  # 原有字段
+  id, date, market, view, regime, lamp_final
+  # 新增字段
+  market_score           # 市场综合分数（加权后）
+  persistence_counter    # 持续计数器（用于regime切换确认）
+  regime_changed         # 是否发生regime变化（布尔）
+  lamp_soft              # 软确认灯色（从ConfirmLayer同步）
+  lamp_hard              # 硬否决灯色（从ConfirmLayer同步）
+  ```
+  
+  **IndicatorWeights**（指标权重配置）- **新增表**：
+  ```python
+  id, market ('CN'|'US'), profile ('Attack'|'Balanced'|'Defense')
+  indicator_code         # 指标代码
+  weight                 # 权重值（百分比）
+  is_active              # 是否启用
+  updated_at
+  ```
+  
+  **DataFetchHistory**（数据获取历史）- 改进FetchLog：
+  ```python
+  id, timestamp, action, status, message
+  # 新增详细字段
+  indicator_code         # 具体指标
+  date_range_start       # 获取的日期范围
+  date_range_end
+  records_fetched        # 获取记录数
+  records_updated        # 更新记录数（增量）
+  error_detail           # 错误详情JSON
+  ```
+
+- [ ] **实现数据库迁移脚本 `storage/migrate.py`**：
+  - `init_db()`: 初始化所有表
+  - `upgrade_schema()`: 版本升级迁移
+  - `seed_default_metadata()`: 填充默认指标元数据（所有CN和US指标）
+
+- [ ] **创建数据库索引优化查询**：
+  ```sql
+  CREATE INDEX idx_series_data_lookup ON series_data(series_id, date, view);
+  CREATE INDEX idx_series_data_date ON series_data(date DESC);
+  CREATE INDEX idx_confirm_layer_lookup ON confirm_layer(market, date, view);
+  CREATE INDEX idx_regimes_lookup ON regimes(market, date, view);
+  ```
+
+### 6.2 Repository增量更新方法
+
+#### 任务清单
+- [ ] **扩展 `storage/repository.py`**，实现以下方法：
+  
+  **增量更新核心方法**：
+  - `get_last_data_date(series_code, view)`: 获取指定指标最新数据日期
+  - `upsert_series_data_batch(series_id, dataframe, view)`: 批量插入/更新（高效）
+  - `delete_data_after_date(series_id, date, view)`: 删除指定日期后数据（重算用）
+  
+  **完整数据存储**：
+  - `save_indicator_full_pipeline(indicator_code, date_range, raw_series, transformed_series, z_series, score_series, lamp_series, view)`:
+    保存单个指标的完整数据链（原始→转换→Z→Score→灯色）
+  
+  - `save_confirm_layer(market, date, view, soft_components, hard_components, final_lamp)`:
+    保存确认层完整数据
+  
+  - `save_regime_with_score(market, date, view, score, regime, lamps)`:
+    保存市场状态和分数
+  
+  **数据读取优化**：
+  - `load_indicator_complete(indicator_code, start_date, end_date, view)`:
+    返回DataFrame包含[date, raw, transformed, z, score, lamp]
+  
+  - `load_market_overview(market, start_date, end_date, view)`:
+    返回市场概览数据（score时间线 + regime + lamps）
+  
+  - `load_confirm_layer_detail(market, start_date, end_date, view)`:
+    返回确认层完整详情
+  
+  **数据完整性检查**：
+  - `check_data_completeness(market, date_range, view)`:
+    检查所有必需指标是否有数据，返回缺失列表
+  
+  - `get_incremental_update_plan(market, target_date)`:
+    返回需要增量更新的指标列表和日期范围
+
+### 6.3 数据流水线完整实现
+
+#### 任务清单
+- [ ] **实现 `core/scheduler.py`**，包含以下功能：
+
+  **增量更新流水线**：
+  - `update_market_incremental(market, end_date=None)`:
+    ```python
+    # 伪代码流程
+    1. 获取该市场所有指标的最新数据日期
+    2. 确定需要更新的日期范围（last_date+1 到 end_date）
+    3. 对每个指标：
+       a. 获取原始数据（仅新日期）
+       b. 合并已有数据，重新计算转换值（保证window完整）
+       c. 计算Z和Score
+       d. 计算单指标灯色
+       e. 批量upsert到数据库
+    4. 计算市场综合分数（加权）
+    5. 计算regime（含persistence）
+    6. 计算确认层（软硬确认）
+    7. 保存最终结果
+    8. 更新SeriesMeta.last_raw_date
+    ```
+  
+  **完整重算流水线**（参数改变后）：
+  - `recompute_market_full(market, start_date, end_date, view, new_params)`:
+    从数据库读取原始数据，用新参数重新计算所有派生数据
+  
+  **周视图生成**：
+  - `generate_weekly_view(market, start_date, end_date)`:
+    从daily数据重采样生成weekly数据（Friday标签）
+  
+  **数据修复工具**：
+  - `backfill_missing_data(market, indicator_code, date_range)`:
+    补填缺失数据
+  
+  - `rebuild_derived_data(market, view)`:
+    重建所有派生数据（Z/Score/Lamp/Regime）
+
+- [ ] **实现指标配置映射 `core/indicator_registry.py`**：
+  ```python
+  # 定义所有指标的元数据
+  INDICATOR_REGISTRY = {
+      'CN_MARGIN_SLOPE': {
+          'name': '两融余额斜率',
+          'market': 'CN',
+          'role': 'main',
+          'direction': 'up_good',
+          'transform': 'slope_20_60_ewma',
+          'transform_params': {'lmbd': 0.94},
+          'z_method': 'z',
+          'z_window': 60,
+          'source': 'csv',
+          'weekly_agg': 'last',
+          'dependencies': []  # 依赖的其他指标
+      },
+      'VIX_LOG': {
+          'name': 'VIX对数',
+          'market': 'US',
+          'role': 'main',
+          'direction': 'down_good',
+          'transform': 'log_winsor',
+          'transform_params': {'p_low': 0.02, 'p_high': 0.98},
+          'z_method': 'madz',
+          'z_window': 40,
+          'source': 'yfinance',
+          'source_symbol': '^VIX',
+          'weekly_agg': 'last',
+          'dependencies': []
+      },
+      # ... 所有其他指标
+  }
+  
+  def get_indicator_config(code):
+      return INDICATOR_REGISTRY[code]
+  
+  def get_market_indicators(market, role=None):
+      # 返回指定市场的指标列表
+  ```
+
+### 6.4 测试验证
+
+#### 测试1：数据库初始化和元数据填充
 ```powershell
-# 运行完整流水线（CN市场部分指标）
+# 初始化数据库
+python -c "
+from storage.migrate import init_db, seed_default_metadata
+
+# 创建测试数据库
+init_db('test_market_thermo.db')
+
+# 填充指标元数据
+seed_default_metadata('test_market_thermo.db')
+
+# 验证
+from storage.repository import Repository
+repo = Repository('test_market_thermo.db')
+cn_indicators = repo.get_indicators_by_market('CN')
+us_indicators = repo.get_indicators_by_market('US')
+
+print(f'CN指标数量: {len(cn_indicators)}')
+print(f'US指标数量: {len(us_indicators)}')
+for ind in cn_indicators:
+    print(f'  {ind.code}: {ind.name} ({ind.role})')
+"
+```
+
+#### 测试2：增量更新单个指标（完整数据链）
+```powershell
 python -c "
 from core.scheduler import Scheduler
 from storage.repository import Repository
 from datetime import datetime, timedelta
 
-repo = Repository('market_thermo.db')
+repo = Repository('test_market_thermo.db')
 scheduler = Scheduler(repo)
 
-# 更新最近30天的US数据（测试）
-result = scheduler.update_market_daily(
-    market='US',
-    start_date=datetime.now() - timedelta(days=30),
+# 首次获取VIX最近90天数据（建立窗口）
+print('=== 首次获取VIX数据 ===')
+result = scheduler.update_indicator(
+    indicator_code='VIX_LOG',
+    start_date=datetime.now() - timedelta(days=90),
     end_date=datetime.now()
 )
-print('更新结果:', result)
+print(f'获取记录数: {result[\"records_fetched\"]}')
 
-# 检查数据库
-vix_data = repo.load_series_data_by_code('VIX_LOG', view='daily')
-print(f'VIX数据条数: {len(vix_data)}')
-print(vix_data.tail())
+# 检查数据库中的完整数据
+data = repo.load_indicator_complete('VIX_LOG', view='daily')
+print(f'\n数据库中VIX记录数: {len(data)}')
+print(f'列: {data.columns.tolist()}')
+print(f'\n最近5条数据:')
+print(data.tail()[['date', 'value_raw', 'value_transformed', 'z_score', 'score_0_100', 'lamp_color']])
+
+# 模拟第二天增量更新（仅新增1天）
+print('\n=== 增量更新（新增1天）===')
+last_date = repo.get_last_data_date('VIX_LOG', 'daily')
+print(f'数据库中最新日期: {last_date}')
+
+# 这里模拟手动添加新数据的场景
+new_date = last_date + timedelta(days=1)
+print(f'增量更新到: {new_date}')
+result = scheduler.update_indicator(
+    indicator_code='VIX_LOG',
+    start_date=new_date,
+    end_date=new_date
+)
+print(f'新增记录数: {result[\"records_updated\"]}')
 "
 ```
 
-### 预期输出
-- 数据成功获取并存入数据库
-- 转换后的值正确
-- Z分数和Score计算正确
-- Regime和Lamp状态正确
+#### 测试3：市场完整流水线（US市场为例）
+```powershell
+python -c "
+from core.scheduler import Scheduler
+from storage.repository import Repository
+from datetime import datetime, timedelta
+
+repo = Repository('test_market_thermo.db')
+scheduler = Scheduler(repo)
+
+# 获取US市场所有主指标最近60天数据
+print('=== US市场完整流水线测试 ===')
+end_date = datetime.now()
+start_date = end_date - timedelta(days=60)
+
+result = scheduler.update_market_incremental(
+    market='US',
+    end_date=end_date
+)
+
+print(f'更新结果: {result}')
+print(f'成功指标数: {result[\"success_count\"]}')
+print(f'失败指标数: {result[\"failed_count\"]}')
+if result['failed_indicators']:
+    print(f'失败指标: {result[\"failed_indicators\"]}')
+
+# 检查市场概览数据
+overview = repo.load_market_overview('US', start_date, end_date, 'daily')
+print(f'\n市场概览数据:')
+print(f'  日期范围: {overview[\"date\"].min()} 到 {overview[\"date\"].max()}')
+print(f'  平均分数: {overview[\"market_score\"].mean():.2f}')
+print(f'  Regime分布:')
+print(overview['regime'].value_counts())
+print(f'  最终灯色分布:')
+print(overview['lamp_final'].value_counts())
+
+# 检查确认层详情
+confirm = repo.load_confirm_layer_detail('US', start_date, end_date, 'daily')
+print(f'\n确认层数据样本（最近3天）:')
+print(confirm.tail(3))
+"
+```
+
+#### 测试4：周视图生成和存储
+```powershell
+python -c "
+from core.scheduler import Scheduler
+from storage.repository import Repository
+from datetime import datetime, timedelta
+
+repo = Repository('test_market_thermo.db')
+scheduler = Scheduler(repo)
+
+# 从已有的日数据生成周数据
+print('=== 生成周视图 ===')
+end_date = datetime.now()
+start_date = end_date - timedelta(days=60)
+
+result = scheduler.generate_weekly_view('US', start_date, end_date)
+print(f'生成周数据记录数: {result[\"weekly_records\"]}')
+
+# 对比日视图和周视图
+daily_data = repo.load_indicator_complete('VIX_LOG', start_date, end_date, 'daily')
+weekly_data = repo.load_indicator_complete('VIX_LOG', start_date, end_date, 'weekly')
+
+print(f'\n日视图记录数: {len(daily_data)}')
+print(f'周视图记录数: {len(weekly_data)}')
+print(f'\n周视图数据（验证Friday标签）:')
+print(weekly_data[['date', 'value_raw', 'score_0_100']].tail())
+print(f'所有日期的星期: {weekly_data[\"date\"].dt.day_name().unique()}')
+"
+```
+
+#### 测试5：数据完整性检查和增量更新计划
+```powershell
+python -c "
+from storage.repository import Repository
+from datetime import datetime, timedelta
+
+repo = Repository('test_market_thermo.db')
+
+# 检查CN市场数据完整性
+print('=== CN市场数据完整性检查 ===')
+end_date = datetime.now()
+start_date = end_date - timedelta(days=60)
+
+completeness = repo.check_data_completeness('CN', (start_date, end_date), 'daily')
+print(f'CN市场指标状态:')
+for ind_code, status in completeness.items():
+    print(f'  {ind_code}: {status[\"status\"]} (数据覆盖: {status[\"coverage_pct\"]:.1f}%)')
+    if status['missing_dates']:
+        print(f'    缺失日期数: {len(status[\"missing_dates\"])}')
+
+# 获取增量更新计划
+print('\n=== US市场增量更新计划 ===')
+update_plan = repo.get_incremental_update_plan('US', datetime.now())
+print(f'需要更新的指标数: {len(update_plan)}')
+for ind_code, plan in update_plan.items():
+    print(f'  {ind_code}: 从 {plan[\"start_date\"]} 更新 {plan[\"days_to_fetch\"]} 天')
+"
+```
+
+#### 测试6：参数变化后的重算
+```powershell
+python -c "
+from core.scheduler import Scheduler
+from storage.repository import Repository
+from core.config import Config
+from datetime import datetime, timedelta
+
+repo = Repository('test_market_thermo.db')
+scheduler = Scheduler(repo)
+config = Config()
+
+# 获取当前参数
+old_params = config.get_params()
+print('=== 当前参数 ===')
+print(f'Regime阈值: attack={old_params[\"regime_thresholds\"][\"attack\"]}, defense={old_params[\"regime_thresholds\"][\"defense\"]}')
+
+# 修改参数（例如改变regime阈值）
+new_params = old_params.copy()
+new_params['regime_thresholds']['attack'] = 75  # 从70改为75
+new_params['regime_thresholds']['defense'] = 35  # 从40改为35
+config.save_params(new_params)
+
+print('\n=== 新参数 ===')
+print(f'Regime阈值: attack=75, defense=35')
+
+# 重新计算US市场（仅派生数据，不重新获取原始数据）
+print('\n=== 重新计算派生数据 ===')
+end_date = datetime.now()
+start_date = end_date - timedelta(days=60)
+
+result = scheduler.recompute_market_full(
+    market='US',
+    start_date=start_date,
+    end_date=end_date,
+    view='daily',
+    new_params=new_params
+)
+
+print(f'重算完成: {result[\"recomputed_records\"]} 条记录')
+
+# 对比regime分布变化
+overview = repo.load_market_overview('US', start_date, end_date, 'daily')
+print(f'\n新参数下的Regime分布:')
+print(overview['regime'].value_counts())
+"
+```
+
+### 6.5 预期输出
+
+#### 数据库结构验证
+- ✅ 所有表创建成功，包含完整字段
+- ✅ 索引创建成功，查询性能良好
+- ✅ CN市场6个主指标 + 观察者元数据完整
+- ✅ US市场6个主指标 + 观察者元数据完整
+
+#### 增量更新验证
+- ✅ 首次获取建立完整数据链：原始→转换→Z→Score→灯色
+- ✅ 第二次更新仅获取新日期数据，旧数据不变
+- ✅ `last_raw_date`字段正确更新
+- ✅ 数据获取日志记录详细
+
+#### 市场流水线验证
+- ✅ US市场所有主指标数据完整
+- ✅ 市场综合分数计算正确（加权平均）
+- ✅ Regime切换逻辑正确（含persistence）
+- ✅ 确认层数据完整存储（软硬确认分离）
+- ✅ 最终灯色逻辑正确（硬否决优先）
+
+#### 周视图验证
+- ✅ 周数据仅包含Friday标签
+- ✅ 周数据数量约为日数据的1/5
+- ✅ 周数据的Score和Lamp基于Friday值
+- ✅ weekly persistence参数正确应用
+
+#### 数据完整性验证
+- ✅ 能检测出缺失数据
+- ✅ 能生成增量更新计划
+- ✅ 部分指标缺失不阻塞其他指标计算
+- ✅ CSV导入的指标正确标记来源
+
+#### 重算验证
+- ✅ 参数变化后能正确重算派生数据
+- ✅ 原始数据保持不变
+- ✅ Regime分布随参数变化而变化
+- ✅ 重算速度快（不需要重新获取网络数据）
+
+### 6.6 关键注意事项
+
+1. **增量更新策略**：
+   - 每次更新前先查询`last_raw_date`
+   - 获取新数据时保留足够的历史窗口（Z计算需要）
+   - 使用`UPSERT`语义避免重复数据
+
+2. **数据依赖处理**：
+   - 相对收益指标（如`CSI1000_OVER_300_REL20`）需要两个标的，确保两者都获取成功
+   - 配对指标（如`PAIR_CNH_CNY`）需要两个子指标的灯色都计算完成
+
+3. **周数据生成**：
+   - 周数据不直接获取，而是从日数据重采样
+   - 使用`resample('W-FRI').last()`确保Friday标签
+   - 周数据的persistence参数与日数据不同
+
+4. **数据质量标记**：
+   - 使用`data_quality`字段标记指标状态
+   - GUI可显示数据质量警告
+   - 允许部分指标缺失，但标记影响范围
+
+5. **性能优化**：
+   - 批量upsert使用DataFrame直接写入
+   - 使用索引加速查询
+   - 读取数据时只选择需要的日期范围
+   - 考虑对大表分区（按年份或市场）
 
 ---
 

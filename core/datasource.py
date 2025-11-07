@@ -839,6 +839,8 @@ class DataSourceManager:
         """
         self.fred_fetcher = FREDFetcher(fred_api_key)
         self.yf_fetcher = YFinanceFetcher()
+        # 提供别名，兼容不同代码引用
+        self.yfinance_fetcher = self.yf_fetcher
         self.akshare_fetcher = AKShareFetcher()
         self.stooq_fetcher = StooqFetcher()  # ← 新增Stooq支持
         self.csv_importer = CSVImporter()
@@ -872,11 +874,32 @@ class DataSourceManager:
                 return self.fred_fetcher.fetch(ticker, start_date, end_date)
             
             elif source == 'yfinance':
+                if isinstance(ticker, (list, tuple)):
+                    tickers = list(ticker)
+                    if len(tickers) == 2:
+                        return self.yf_fetcher.fetch_pair(
+                            tickers[0],
+                            tickers[1],
+                            start_date,
+                            end_date
+                        )
+                    else:
+                        series_tuple = tuple(
+                            self.yf_fetcher.fetch(t, start_date, end_date)
+                            for t in tickers
+                        )
+                        return series_tuple
                 return self.yf_fetcher.fetch(ticker, start_date, end_date)
             
             elif source == 'akshare':
                 # 使用akshare获取中国市场数据
                 symbol = indicator_config.get('symbol', ticker)
+                if isinstance(symbol, (list, tuple)):
+                    series_tuple = tuple(
+                        self.akshare_fetcher.fetch(sym, start_date, end_date)
+                        for sym in symbol
+                    )
+                    return series_tuple
                 return self.akshare_fetcher.fetch(symbol, start_date, end_date)
             
             elif source == 'stooq':
