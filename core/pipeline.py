@@ -65,7 +65,26 @@ class MarketPipeline:
         # 获取市场配置
         main_indicators = self.config.get(f'indicators.{self.market}.main', [])
         observer_indicators = self.config.get(f'indicators.{self.market}.observers', [])
-        self.indicators = main_indicators + observer_indicators
+        
+        # 规范化指标配置并建立索引
+        self.indicators: List[Dict[str, Any]] = []
+        self.indicator_lookup: Dict[str, Dict[str, Any]] = {}
+        
+        for cfg in main_indicators:
+            normalized = self._normalize_indicator_config(cfg.copy(), default_role='main')
+            self.indicators.append(normalized)
+            self.indicator_lookup[normalized['code']] = normalized
+        
+        for cfg in observer_indicators:
+            normalized = self._normalize_indicator_config(
+                cfg.copy(),
+                default_role=cfg.get('role', 'observer')
+            )
+            self.indicators.append(normalized)
+            self.indicator_lookup[normalized['code']] = normalized
+        
+        # 扩展派生/配对组件配置
+        self._augment_indicator_components()
         
         # 获取市场特定参数
         self.market_config = {
@@ -91,6 +110,100 @@ class MarketPipeline:
                 series.index = idx.tz_convert('UTC').tz_localize(None)
             series = series.sort_index()
         return series
+    
+    def _normalize_indicator_config(
+        self,
+        config: Dict[str, Any],
+        default_role: str = 'main'
+    ) -> Dict[str, Any]:
+        """
+        标准化指标配置，补全缺省字段
+        
+        @param {Dict[str, Any]} config - 原始配置
+        @param {str} default_role - 默认角色
+        @returns {Dict[str, Any]} 规范化后的配置
+        """
+        cfg = config
+        code = cfg.get('code')
+        if not code:
+            raise ValueError("Indicator configuration must include 'code'")
+        
+        cfg.setdefault('market', self.market)
+        cfg.setdefault('role', default_role)
+        cfg.setdefault('name', code)
+        cfg.setdefault('direction', 'up_good')
+        cfg.setdefault('transform', 'raw')
+        cfg.setdefault('z_type', 'Z')
+        cfg.setdefault('z_window', 60)
+        
+        if 'include_in_scoring' not in cfg:
+            if cfg.get('pair'):
+                cfg['include_in_scoring'] = False
+            elif cfg.get('derived', False):
+                cfg['include_in_scoring'] = True
+            elif cfg.get('source'):
+                cfg['include_in_scoring'] = True
+            else:
+                cfg['include_in_scoring'] = False
+        
+        return cfg
+    
+    def _augment_indicator_components(self) -> None:
+        """
+        将派生指标及配对指标所需的组件补充到指标列表中
+        """
+        extra_indicators: List[Dict[str, Any]] = []
+        seen_codes = set(self.indicator_lookup.keys())
+        
+        for indicator in list(self.indicators):
+            components = indicator.get('components', [])
+            if not components:
+                continue
+            
+            if indicator.get('derived'):
+                for component in components:
+                    comp_code = component.get('code')
+                    if not comp_code or comp_code in seen_codes:
+                        continue
+                    
+                    comp_cfg = component.copy()
+                    comp_cfg.setdefault('name', comp_code)
+                    comp_cfg.setdefault('direction', 'up_good')
+                    comp_cfg.setdefault('transform', 'raw')
+                    comp_cfg.setdefault('z_type', indicator.get('z_type', 'Z'))
+                    comp_cfg.setdefault('z_window', indicator.get('z_window', 60))
+                    comp_cfg['role'] = comp_cfg.get('role', 'component')
+                    comp_cfg['parent_code'] = indicator['code']
+                    comp_cfg['include_in_scoring'] = comp_cfg.get('include_in_scoring', False)
+                    
+                    normalized = self._normalize_indicator_config(comp_cfg, default_role='component')
+                    extra_indicators.append(normalized)
+                    seen_codes.add(comp_code)
+                    self.indicator_lookup[comp_code] = normalized
+            
+            if indicator.get('pair'):
+                for component in components:
+                    comp_code = component.get('code')
+                    if not comp_code or comp_code in seen_codes:
+                        continue
+                    
+                    comp_cfg = component.copy()
+                    comp_cfg.setdefault('name', comp_code)
+                    comp_cfg.setdefault('direction', 'up_good')
+                    comp_cfg.setdefault('transform', component.get('transform', 'raw'))
+                    comp_cfg.setdefault('z_type', component.get('z_type', 'Z'))
+                    comp_cfg.setdefault('z_window', component.get('z_window', 60))
+                    comp_cfg['role'] = comp_cfg.get('role', 'pair_component')
+                    comp_cfg['parent_code'] = indicator['code']
+                    comp_cfg['include_in_scoring'] = comp_cfg.get('include_in_scoring', True)
+                    
+                    normalized = self._normalize_indicator_config(comp_cfg, default_role='component')
+                    extra_indicators.append(normalized)
+                    seen_codes.add(comp_code)
+                    self.indicator_lookup[comp_code] = normalized
+        
+        if extra_indicators:
+            self.indicators.extend(extra_indicators)
 
     def fetch_all_data(
         self,
@@ -125,15 +238,20 @@ class MarketPipeline:
         # 获取数据
         results = {}
         success_count = 0
+        total_fetchable = sum(
+            1
+            for indicator in self.indicator_lookup.values()
+            if indicator.get('source') and indicator.get('source', '').lower() != 'csv'
+        )
         
-        for indicator in self.indicators:
+        for indicator in self.indicator_lookup.values():
             code = indicator['code']
             source = indicator.get('source', '')
             
             try:
                 # 跳过没有source的派生指标（观察者指标）
                 if not source:
-                    print(f"[SKIP] {code} - 派生指标")
+                    print(f"[SKIP] {code} - 无可用数据源")
                     continue
                 
                 # 跳过CSV类型（需要手动导入）
@@ -160,13 +278,15 @@ class MarketPipeline:
             except Exception as e:
                 print(f"  [ERROR] {code} 获取失败: {e}")
         
-        print(f"\n[OK] 成功获取 {success_count}/{len(self.indicators)} 个指标")
+        if total_fetchable == 0:
+            total_fetchable = 1  # 避免除零或显示0
+        print(f"\n[OK] 成功获取 {success_count}/{total_fetchable} 个指标")
         
         # 记录获取日志
         self.repository.add_fetch_log(
             action='fetch_all',
             status='success',
-            message=f"Fetched {success_count}/{len(self.indicators)} indicators for {self.market}"
+            message=f"Fetched {success_count}/{total_fetchable} indicators for {self.market}"
         )
         
         return results
@@ -183,16 +303,12 @@ class MarketPipeline:
         """
         print(f"\n[INFO] 应用数据转换...")
         
-        transformed = {}
+        transformed: Dict[str, pd.Series] = {}
         
-        for indicator in self.indicators:
-            code = indicator['code']
-            
-            if code not in raw_data:
-                continue
-            
+        for code, series in raw_data.items():
+            indicator = self.indicator_lookup.get(code, {})
             transform = indicator.get('transform', 'raw')
-            series = self._ensure_naive_series(raw_data[code])
+            series = self._ensure_naive_series(series)
             
             try:
                 if transform == 'raw':
@@ -212,21 +328,23 @@ class MarketPipeline:
     
     def calculate_derived_indicators(
         self,
-        base_data: Dict[str, pd.Series],
+        raw_data: Dict[str, pd.Series],
+        transformed_data: Dict[str, pd.Series],
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None
-    ) -> Dict[str, pd.Series]:
+    ) -> Tuple[Dict[str, pd.Series], Dict[str, pd.Series]]:
         """
         计算派生指标
         
-        @param {Dict[str, pd.Series]} base_data - 基础数据（已转换）
+        @param {Dict[str, pd.Series]} raw_data - 原始数据（将被更新）
+        @param {Dict[str, pd.Series]} transformed_data - 转换后数据（将被更新）
         @param {Optional[datetime]} start_date - 开始日期
         @param {Optional[datetime]} end_date - 结束日期
-        @returns {Dict[str, pd.Series]} 包含派生指标的完整数据
+        @returns {Tuple[Dict[str, pd.Series], Dict[str, pd.Series]]} (更新后的原始数据, 更新后的转换数据)
         """
         print(f"\n[INFO] 计算派生指标...")
         
-        result = base_data.copy()
+        result = transformed_data.copy()
         derived_count = 0
         
         for indicator in self.indicators:
@@ -250,11 +368,11 @@ class MarketPipeline:
                 component_data = {}
                 for comp in components:
                     comp_code = comp['code']
-                    comp_source = comp['source']
-                    comp_symbol = comp['symbol']
+                    comp_source = comp.get('source')
+                    comp_symbol = comp.get('symbol')
                     
-                    # 获取组件数据
-                    if comp_code not in result:
+                    # 获取组件数据（若转换结果缺失，尝试拉取）
+                    if comp_code not in raw_data:
                         print(f"  [FETCH] 组件 {comp_code}...")
                         comp_config = {
                             'code': comp_code,
@@ -266,13 +384,50 @@ class MarketPipeline:
                         if len(comp_series) > 0:
                             comp_series = self._ensure_naive_series(comp_series)
                             component_data[comp_code] = comp_series
-                            result[comp_code] = comp_series  # 保存组件数据
+                            raw_data[comp_code] = comp_series  # 保存组件原始数据
+                            
+                            # 注册动态组件配置，便于后续存储
+                            if comp_code not in self.indicator_lookup:
+                                comp_cfg = {
+                                    'code': comp_code,
+                                    'name': comp.get('name', comp_code),
+                                    'role': comp.get('role', 'component'),
+                                    'direction': comp.get('direction', 'up_good'),
+                                    'transform': comp.get('transform', 'raw'),
+                                    'source': comp_source,
+                                    'symbol': comp_symbol,
+                                    'ticker': comp.get('ticker'),
+                                    'z_type': comp.get('z_type', indicator.get('z_type', 'Z')),
+                                    'z_window': comp.get('z_window', indicator.get('z_window', 60)),
+                                    'include_in_scoring': comp.get('include_in_scoring', False),
+                                    'parent_code': indicator['code']
+                                }
+                                normalized = self._normalize_indicator_config(comp_cfg, default_role='component')
+                                self.indicators.append(normalized)
+                                self.indicator_lookup[comp_code] = normalized
+                            
+                            comp_transform = self.indicator_lookup[comp_code].get('transform', 'raw')
+                            if comp_transform == 'raw':
+                                result[comp_code] = comp_series
+                            else:
+                                result[comp_code] = self._ensure_naive_series(
+                                    apply_transform(comp_series, comp_transform)
+                                )
                             print(f"    [OK] {len(comp_series)} 条记录")
                         else:
                             print(f"    [FAIL] 未获取到数据")
                             raise Exception(f"组件 {comp_code} 数据获取失败")
                     else:
-                        component_data[comp_code] = result[comp_code]
+                        base_series = raw_data[comp_code]
+                        component_data[comp_code] = base_series
+                        if comp_code not in result:
+                            comp_transform = self.indicator_lookup.get(comp_code, {}).get('transform', 'raw')
+                            if comp_transform == 'raw':
+                                result[comp_code] = base_series
+                            else:
+                                result[comp_code] = self._ensure_naive_series(
+                                    apply_transform(base_series, comp_transform)
+                                )
                 
                 # 计算派生指标
                 # 解析计算公式并执行（简单的减法）
@@ -287,16 +442,21 @@ class MarketPipeline:
                         series2 = component_data[var2]
                         
                         # 对齐索引
-                        common_idx = series1.index.intersection(series2.index)
-                        derived_series = series1.loc[common_idx] - series2.loc[common_idx]
+                        series1, series2 = series1.align(series2, join='inner')
+                        derived_series = series1 - series2
                         
                         # 应用转换（如winsor）
                         transform = indicator.get('transform', 'raw')
+                        transformed_series = derived_series
                         if transform != 'raw':
-                            derived_series = apply_transform(derived_series, transform)
+                            transformed_series = apply_transform(derived_series, transform)
                         
                         derived_series = self._ensure_naive_series(derived_series)
-                        result[code] = derived_series
+                        transformed_series = self._ensure_naive_series(transformed_series)
+                        
+                        # 保存原始/转换数据
+                        raw_data[code] = derived_series
+                        result[code] = transformed_series
                         derived_count += 1
                         print(f"  [OK] 计算完成: {len(derived_series)} 条记录")
                     else:
@@ -309,7 +469,7 @@ class MarketPipeline:
         
         print(f"[OK] 完成 {derived_count} 个派生指标的计算")
         
-        return result
+        return raw_data, result
     
     def calculate_scores(
         self,
@@ -325,9 +485,16 @@ class MarketPipeline:
         """
         print(f"\n[INFO] 计算 {view_type} 评分...")
         
+        # 选择参与评分的指标
+        scoring_codes = [
+            code for code, series in transformed_data.items()
+            if isinstance(series, pd.Series)
+            and len(series) > 0
+            and self.indicator_lookup.get(code, {}).get('include_in_scoring', True)
+        ]
+
         # 对齐所有序列到统一的日期索引（取并集）
-        codes_list = list(transformed_data.keys())
-        series_list = [transformed_data[code] for code in codes_list if len(transformed_data[code]) > 0]
+        series_list = [transformed_data[code] for code in scoring_codes]
 
         if not series_list:
             raise PipelineError("No valid data for scoring")
@@ -343,10 +510,10 @@ class MarketPipeline:
         all_dates = all_dates.tz_localize(None)
         all_dates = all_dates.sort_values()
 
-        df = pd.DataFrame({
-            code: transformed_data[code].reindex(all_dates)
-            for code in codes_list if code in transformed_data
-        }, index=all_dates)
+        df = pd.DataFrame(
+            {code: transformed_data[code].reindex(all_dates) for code in scoring_codes},
+            index=all_dates
+        )
         
         # 如果是周度，重采样
         if view_type == 'weekly':
@@ -357,14 +524,13 @@ class MarketPipeline:
         data_dict = {code: df[code] for code in df.columns}
         config_dict = {}
         
-        for indicator in self.indicators:
-            code = indicator['code']
-            if code in df.columns:
-                config_dict[code] = {
-                    'direction': indicator.get('direction', 'up_good'),
-                    'z_type': self.market_config.get('z_type', 'z'),
-                    'z_window': self.market_config.get('z_window', 60)
-                }
+        for code in df.columns:
+            indicator = self.indicator_lookup.get(code, {})
+            config_dict[code] = {
+                'direction': indicator.get('direction', 'up_good'),
+                'z_type': indicator.get('z_type', self.market_config.get('z_type', 'Z')),
+                'z_window': indicator.get('z_window', self.market_config.get('z_window', 60))
+            }
         
         # 批量标准化（返回字典）
         z_dict = batch_standardize(data_dict, config_dict)
@@ -406,8 +572,7 @@ class MarketPipeline:
         green_th = self.market_config.get('green_threshold', 60)
         red_th = self.market_config.get('red_threshold', 40)
 
-        for indicator in self.indicators:
-            code = indicator['code']
+        for code, indicator in self.indicator_lookup.items():
             score_col = f"{code}_score"
             if score_col in scores.columns:
                 indicator_lamps[code] = lamp_from_score(scores[score_col], green_th, red_th)
@@ -417,8 +582,7 @@ class MarketPipeline:
         observer_lamps: Dict[str, pd.Series] = {}
         pair_lamps: Dict[str, Tuple[pd.Series, pd.Series]] = {}
 
-        for indicator in self.indicators:
-            code = indicator['code']
+        for code, indicator in self.indicator_lookup.items():
             role = indicator.get('role', 'main')
 
             if indicator.get('pair'):
@@ -465,9 +629,9 @@ class MarketPipeline:
             print(f"[OK] 确认层计算完成")
 
             return {
-                'hard_veto_lamp': result.get('hard_veto'),
-                'soft_confirm_lamp': result.get('soft_confirm'),
-                'final_lamp': result.get('final'),
+                'hard_veto': result.get('hard_veto'),
+                'soft_confirm': result.get('soft_confirm'),
+                'final': result.get('final'),
                 'pair_lamps': result.get('pairs', {})
             }
 
@@ -498,7 +662,7 @@ class MarketPipeline:
         total_saved = 0
         
         # 1. 保存序列元数据（如果不存在）
-        for indicator in self.indicators:
+        for indicator in self.indicator_lookup.values():
             code = indicator['code']
             
             existing = self.repository.get_series_meta_by_code(code)
@@ -516,29 +680,42 @@ class MarketPipeline:
         
         # 准备code到series_id的映射
         code_to_series_id: Dict[str, int] = {}
-        for indicator in self.indicators:
+        for indicator in self.indicator_lookup.values():
             code = indicator['code']
             meta = self.repository.get_series_meta_by_code(code)
             if meta and 'id' in meta:
                 code_to_series_id[code] = meta['id']
 
         # 2. 保存时间序列数据
-        for code in raw_data.keys():
-            if code not in transformed_data:
-                continue
-            
+        all_series_codes = set(raw_data.keys()) | set(transformed_data.keys())
+        
+        for code in all_series_codes:
             series_id = code_to_series_id.get(code)
             if series_id is None:
                 continue
 
-            raw_series = raw_data[code]
-            trans_series = transformed_data[code]
+            trans_series = transformed_data.get(code)
+            raw_series = raw_data.get(code)
             
-            # 对齐索引
-            common_idx = raw_series.index.intersection(trans_series.index)
+            if not isinstance(trans_series, pd.Series) or len(trans_series) == 0:
+                continue
             
-            for date in common_idx:
+            trans_series = self._ensure_naive_series(trans_series)
+            
+            if isinstance(raw_series, pd.Series):
+                raw_series = self._ensure_naive_series(raw_series).reindex(trans_series.index)
+            else:
+                raw_series = pd.Series(index=trans_series.index, dtype=float)
+            
+            for date, trans_value in trans_series.items():
                 try:
+                    if isinstance(date, pd.Timestamp):
+                        record_date = date.date()
+                    elif isinstance(date, datetime):
+                        record_date = date.date()
+                    else:
+                        record_date = date
+                    
                     # 获取对应的评分
                     score_col = f"{code}_score"
                     z_col = f"{code}_z"
@@ -552,12 +729,19 @@ class MarketPipeline:
                     if z_col in scores.columns and date in scores.index:
                         z_val = scores.loc[date, z_col]
                     
+                    raw_value = raw_series.loc[date] if date in raw_series.index else None
+                    if raw_value is not None and (not np.isscalar(raw_value) or pd.isna(raw_value)):
+                        raw_value = None
+                    
+                    if trans_value is not None and (not np.isscalar(trans_value) or pd.isna(trans_value)):
+                        trans_value = None
+                    
                     self.repository.upsert_series_data(
                         series_id=series_id,
-                        date=date.to_pydatetime(),
+                        date=record_date,
                         view=view_type,
-                        value_raw=float(raw_series.loc[date]) if pd.notna(raw_series.loc[date]) else None,
-                        value_tr=float(trans_series.loc[date]) if pd.notna(trans_series.loc[date]) else None,
+                        value_raw=float(raw_value) if raw_value is not None else None,
+                        value_tr=float(trans_value) if trans_value is not None else None,
                         z=float(z_val) if pd.notna(z_val) else None,
                         score=float(score_val) if pd.notna(score_val) else None
                     )
@@ -569,30 +753,71 @@ class MarketPipeline:
                     continue
         
         # 3. 保存Regime数据
-        if 'final_lamp' in confirm_results:
-            final_lamp = confirm_results['final_lamp']
+        if 'final' in confirm_results:
+            final_lamp = confirm_results['final']
+            hard_veto_lamp = confirm_results.get('hard_veto', pd.Series(dtype=str))
+            soft_confirm_lamp = confirm_results.get('soft_confirm', pd.Series(dtype=str))
             
             # 计算当前参数的哈希
             params_hash = self._calculate_params_hash()
             
             for date in final_lamp.index:
                 try:
+                    if isinstance(date, pd.Timestamp):
+                        record_date = date.date()
+                    elif isinstance(date, datetime):
+                        record_date = date.date()
+                    else:
+                        record_date = date
+                    
                     # 这里简化处理，实际需要计算regime
                     regime_val = 'Balanced'  # 临时值
                     
                     self.repository.upsert_regime(
-                        date=date.to_pydatetime(),
+                        date=record_date,
                         market=self.market,
                         view=view_type,
                         regime=regime_val,
-                        final_lamp=final_lamp.loc[date],
-                        soft_lamp=confirm_results.get('soft_confirm', pd.Series()).get(date, 'Y'),
-                        hard_lamp=confirm_results.get('hard_veto', pd.Series()).get(date, 'G'),
+                        lamp_final=final_lamp.loc[date],
+                        lamp_soft=soft_confirm_lamp.get(date, 'Y'),
+                        lamp_hard=hard_veto_lamp.get(date, 'G'),
                         params_hash=params_hash
                     )
                 
                 except Exception as e:
                     continue
+            
+            # 保存聚合灯色历史
+            lamp_series_map = [
+                ('final', 'FINAL_LAMP', final_lamp),
+                ('soft_confirm', 'SOFT_CONFIRM', soft_confirm_lamp),
+                ('hard_veto', 'HARD_VETO', hard_veto_lamp)
+            ]
+            
+            for source_type, source_code, lamp_series in lamp_series_map:
+                if lamp_series.empty:
+                    continue
+                for date, lamp_value in lamp_series.items():
+                    try:
+                        if pd.isna(lamp_value):
+                            continue
+                        if isinstance(date, pd.Timestamp):
+                            record_date = date.date()
+                        elif isinstance(date, datetime):
+                            record_date = date.date()
+                        else:
+                            record_date = date
+
+                        self.repository.upsert_lamp_history(
+                            date=record_date,
+                            market=self.market,
+                            view=view_type,
+                            source_type=source_type,
+                            source_code=source_code,
+                            lamp=lamp_value
+                        )
+                    except Exception as e:
+                        print(f"[WARN] 记录灯色历史失败 ({source_code}): {e}")
         
         print(f"[OK] 保存了 {total_saved} 条记录到数据库")
         
@@ -634,7 +859,12 @@ class MarketPipeline:
             transformed_data = self.transform_data(raw_data)
             
             # 2.5 计算派生指标
-            transformed_data = self.calculate_derived_indicators(transformed_data, start_date, end_date)
+            raw_data, transformed_data = self.calculate_derived_indicators(
+                raw_data,
+                transformed_data,
+                start_date,
+                end_date
+            )
             
             # 3. 计算评分
             scores = self.calculate_scores(transformed_data, view_type='daily')
@@ -702,7 +932,12 @@ class MarketPipeline:
                 raise PipelineError("No data fetched")
             
             transformed_data = self.transform_data(raw_data)
-            transformed_data = self.calculate_derived_indicators(transformed_data, start_date, end_date)
+            raw_data, transformed_data = self.calculate_derived_indicators(
+                raw_data,
+                transformed_data,
+                start_date,
+                end_date
+            )
             scores = self.calculate_scores(transformed_data, view_type='weekly')
             confirm_results = self.apply_confirm_layer(scores, view_type='weekly')
             

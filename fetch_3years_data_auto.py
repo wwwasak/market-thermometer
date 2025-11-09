@@ -338,7 +338,8 @@ def fetch_3years_data_auto(market: str, db_url: str) -> Dict[str, Any]:
     print(f"\n[INFO] 开始数据转换...")
     try:
         transformed_data = pipeline.transform_data(raw_data)
-        transformed_data = pipeline.calculate_derived_indicators(
+        raw_data, transformed_data = pipeline.calculate_derived_indicators(
+            raw_data,
             transformed_data,
             start_date=start_date,
             end_date=end_date
