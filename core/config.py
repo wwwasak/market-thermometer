@@ -187,9 +187,8 @@ class Config:
                             "transform": "pct20",
                             "z_type": "MADZ",
                             "z_window": 60,
-                            "source": "stooq",
-                            "symbol": "CNH",
-                            "ticker": "CNH"
+                            "source": "akshare_fx",
+                            "symbol": "USDCNH"
                         },
                         {
                             "code": "NORTH_TURNOVER_SHARE",

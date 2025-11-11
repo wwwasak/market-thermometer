@@ -8,11 +8,13 @@
 """
 
 import os
-import pandas as pd
-import numpy as np
-from typing import Optional, List, Dict, Any, Tuple
-from datetime import datetime, date, timedelta
 import time
+from datetime import datetime, date, timedelta
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+import requests
 
 # 环境变量和配置
 from dotenv import load_dotenv
@@ -653,6 +655,58 @@ class AKShareFetcher:
             raise DataFetchError(f"Failed to fetch ETF flow data: {e}")
 
 
+class AKForexFetcher:
+    """
+    东方财富外汇历史数据获取器（基于 AkShare）
+    
+    数据来源：https://quote.eastmoney.com/cnyrate/
+    """
+
+    def fetch(
+        self,
+        symbol: str,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+    ) -> pd.Series:
+        """
+        获取外汇历史数据，例如 USD/CNH。
+
+        @param symbol: 外汇代码，如 'USDCNH'
+        @param start_date: 开始日期
+        @param end_date: 结束日期
+        @returns: pd.Series，索引为日期，数值为收盘价
+        """
+        try:
+            import akshare as ak
+        except ImportError as exc:
+            raise DataFetchError("akshare not installed. Run: pip install akshare") from exc
+
+        try:
+            df = ak.forex_hist_em(symbol=symbol.upper())
+        except Exception as exc:
+            raise DataFetchError(f"Failed to fetch forex {symbol} from EastMoney: {exc}") from exc
+
+        if df is None or df.empty:
+            raise DataFetchError(f"No forex data returned for {symbol}")
+
+        # 原始列名为中文，按位置重命名
+        df.columns = ["date", "symbol", "name", "close", "open", "high", "low", "pct_change"]
+        df["date"] = pd.to_datetime(df["date"])
+        df.sort_values("date", inplace=True)
+
+        if start_date:
+            df = df[df["date"] >= pd.to_datetime(start_date)]
+        if end_date:
+            df = df[df["date"] <= pd.to_datetime(end_date)]
+
+        if df.empty:
+            raise DataFetchError(f"No forex data for {symbol} in requested range")
+
+        series = pd.Series(df["close"].astype(float).values, index=df["date"])
+        print(f"[OK] Fetched {len(series)} forex records for {symbol} from EastMoney")
+        return series
+
+
 class CSVImporter:
     """
     CSV文件导入器
@@ -814,14 +868,95 @@ class StooqFetcher:
             # 转换为正序
             df = df.sort_index()
             
-            # 使用收盘价
-            series = df['Close']
+            series = df['Close'].astype(float)
+
+            # Stooq的CNH/CNY报价为“100美元兑本币”，需转换为USD/CNH
+            if symbol.upper() in {"CNH", "CNY"}:
+                series = 100.0 / series
             
             print(f"[OK] Fetched {len(series)} records for {symbol}")
             return series
             
         except Exception as e:
             raise DataFetchError(f"Failed to fetch from Stooq: {e}")
+
+
+class ExchangeRateHostFetcher:
+    """
+    ExchangeRate.host 汇率获取器
+    
+    免费提供多货币历史汇率，支持按日期范围查询。
+    文档：https://exchangerate.host/#/#docs
+    """
+
+    BASE_URL = "https://api.exchangerate.host/timeseries"
+
+    def fetch(
+        self,
+        base: str = "USD",
+        symbol: str = "CNH",
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        retry: int = 3,
+        retry_delay: float = 1.0,
+    ) -> pd.Series:
+        """
+        获取指定货币对的汇率时间序列（默认 USD/CNH）
+        
+        @param base: 基础货币（默认 USD）
+        @param symbol: 目标货币（默认 CNH）
+        @param start_date: 开始日期
+        @param end_date: 结束日期
+        @returns: pd.Series，索引为日期，数值为汇率
+        """
+        if start_date is None:
+            end_date = end_date or datetime.utcnow()
+            start_date = end_date - timedelta(days=730)
+        if end_date is None:
+            end_date = datetime.utcnow()
+
+        base = base.upper()
+        symbol = symbol.upper()
+
+        params = {
+            "base": base,
+            "symbols": symbol,
+            "start_date": start_date.strftime("%Y-%m-%d"),
+            "end_date": end_date.strftime("%Y-%m-%d"),
+        }
+
+        for attempt in range(retry):
+            try:
+                response = requests.get(self.BASE_URL, params=params, timeout=10)
+                response.raise_for_status()
+                payload = response.json()
+
+                if not payload.get("success", False):
+                    raise DataFetchError(f"ExchangeRate.host returned error: {payload}")
+
+                rates = payload.get("rates", {})
+                if not rates:
+                    raise DataFetchError("Empty rates returned")
+
+                data = {
+                    pd.to_datetime(date_str): values.get(symbol)
+                    for date_str, values in rates.items()
+                    if values and values.get(symbol) is not None
+                }
+
+                if not data:
+                    raise DataFetchError("No valid data points returned")
+
+                series = pd.Series(data, dtype=float).sort_index()
+                print(f"[OK] Fetched {len(series)} records for {base}/{symbol} from ExchangeRate.host")
+                return series
+
+            except (requests.RequestException, ValueError) as exc:
+                if attempt < retry - 1:
+                    print(f"[WARNING] Attempt {attempt + 1} failed for ExchangeRateHost {base}/{symbol}: {exc}")
+                    time.sleep(retry_delay)
+                else:
+                    raise DataFetchError(f"Failed to fetch {base}/{symbol} after {retry} attempts: {exc}")
 
 
 class DataSourceManager:
@@ -843,6 +978,8 @@ class DataSourceManager:
         self.yfinance_fetcher = self.yf_fetcher
         self.akshare_fetcher = AKShareFetcher()
         self.stooq_fetcher = StooqFetcher()  # ← 新增Stooq支持
+        self.ak_forex_fetcher = AKForexFetcher()
+        self.fx_fetcher = ExchangeRateHostFetcher()
         self.csv_importer = CSVImporter()
     
     def fetch_by_config(
@@ -906,6 +1043,28 @@ class DataSourceManager:
                 # 使用Stooq获取外汇数据（特别是CNH）
                 symbol = indicator_config.get('symbol', ticker)
                 return self.stooq_fetcher.fetch(symbol, start_date, end_date)
+            
+            elif source in {'akshare_fx', 'ak_forex', 'eastmoney_fx'}:
+                symbol = indicator_config.get('symbol') or indicator_config.get('ticker')
+                if not symbol:
+                    raise DataFetchError("akshare forex fetcher requires 'symbol' or 'ticker'")
+                return self.ak_forex_fetcher.fetch(
+                    symbol=str(symbol),
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            
+            elif source in ('exchangerate', 'exchangerate_host', 'exchange_rate_host'):
+                base_currency = indicator_config.get('base', 'USD')
+                target_currency = indicator_config.get('symbol') or indicator_config.get('ticker')
+                if not target_currency:
+                    raise DataFetchError("ExchangeRateHost requires 'symbol' or 'ticker' for target currency")
+                return self.fx_fetcher.fetch(
+                    base=str(base_currency),
+                    symbol=str(target_currency),
+                    start_date=start_date,
+                    end_date=end_date,
+                )
             
             elif source == 'csv':
                 # CSV需要事先导入，这里返回空

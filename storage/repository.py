@@ -87,7 +87,28 @@ class Repository:
             session.rollback()
             # 如果code已存在，返回现有ID
             existing = session.query(SeriesMeta).filter_by(code=code).first()
-            return existing.id if existing else None
+            if existing:
+                updated = False
+                mapping = {
+                    "name": name,
+                    "market": market,
+                    "role": role,
+                    "direction": direction,
+                    "transform": transform,
+                    "z_type": z_type,
+                    "z_window": z_window,
+                    "source": source,
+                    "ticker": ticker,
+                    "note": note,
+                }
+                for field, value in mapping.items():
+                    if getattr(existing, field) != value:
+                        setattr(existing, field, value)
+                        updated = True
+                if updated:
+                    session.commit()
+                return existing.id
+            return None
         finally:
             session.close()
     

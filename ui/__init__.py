@@ -1,5 +1,6 @@
 """
 双市场温度计 - UI模块
-包含主窗口、面板、图表和表格组件
 """
 
+from ui.main_window import ThermometerMainWindow, launch_gui  # noqa: F401
+from ui.charts import IndicatorChartWidget  # noqa: F401
