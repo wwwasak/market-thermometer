@@ -110,6 +110,24 @@ class MarketPipeline:
                 series.index = idx.tz_convert('UTC').tz_localize(None)
             series = series.sort_index()
         return series
+
+    @staticmethod
+    def _align_raw_series(raw_series: pd.Series, target_index: pd.Index) -> pd.Series:
+        """
+        将低频原始序列与目标索引对齐，必要时进行前向填充
+        以便在GUI中展示原始值（解决月度/周度指标原始值缺失的问题）
+        """
+        if not isinstance(raw_series, pd.Series):
+            return raw_series
+
+        aligned = raw_series.reindex(target_index)
+        if len(aligned) == 0:
+            return aligned
+
+        nan_ratio = aligned.isna().sum() / len(aligned) if len(aligned) > 0 else 1.0
+        if nan_ratio > 0.3:  # 低频数据通常缺失较多，前向填充以保证可视化
+            aligned = aligned.ffill()
+        return aligned
     
     def _normalize_indicator_config(
         self,
@@ -305,13 +323,25 @@ class MarketPipeline:
         
         transformed: Dict[str, pd.Series] = {}
         
-        for code, series in raw_data.items():
+        for code, data_obj in raw_data.items():
             indicator = self.indicator_lookup.get(code, {})
             transform = indicator.get('transform', 'raw')
-            series = self._ensure_naive_series(series)
+            extra_value_tr: Optional[pd.Series] = None
+
+            if isinstance(data_obj, pd.DataFrame):
+                if 'value_raw' not in data_obj.columns:
+                    print(f"[WARN] {code} 数据缺少 value_raw 列，跳过转换")
+                    continue
+                series = self._ensure_naive_series(data_obj['value_raw'])
+                if 'value_tr' in data_obj.columns:
+                    extra_value_tr = self._ensure_naive_series(data_obj['value_tr'])
+            else:
+                series = self._ensure_naive_series(data_obj)
             
             try:
-                if transform == 'raw':
+                if extra_value_tr is not None:
+                    transformed_series = extra_value_tr
+                elif transform == 'raw':
                     transformed_series = series
                 else:
                     transformed_series = apply_transform(series, transform)
@@ -694,18 +724,29 @@ class MarketPipeline:
             if series_id is None:
                 continue
 
+            raw_obj = raw_data.get(code)
             trans_series = transformed_data.get(code)
-            raw_series = raw_data.get(code)
-            
-            if not isinstance(trans_series, pd.Series) or len(trans_series) == 0:
+            extra_value_tr_series: Optional[pd.Series] = None
+
+            if trans_series is None or len(trans_series) == 0:
                 continue
-            
+
             trans_series = self._ensure_naive_series(trans_series)
-            
-            if isinstance(raw_series, pd.Series):
-                raw_series = self._ensure_naive_series(raw_series).reindex(trans_series.index)
+
+            target_index = trans_series.index
+
+            if isinstance(raw_obj, pd.DataFrame):
+                if 'value_raw' not in raw_obj.columns:
+                    continue
+                raw_series = self._ensure_naive_series(raw_obj['value_raw'])
+                raw_series = self._align_raw_series(raw_series, target_index)
+                if 'value_tr' in raw_obj.columns:
+                    extra_value_tr_series = self._ensure_naive_series(raw_obj['value_tr']).reindex(target_index)
+            elif isinstance(raw_obj, pd.Series):
+                raw_series = self._ensure_naive_series(raw_obj)
+                raw_series = self._align_raw_series(raw_series, target_index)
             else:
-                raw_series = pd.Series(index=trans_series.index, dtype=float)
+                raw_series = pd.Series(index=target_index, dtype=float)
             
             for date, trans_value in trans_series.items():
                 try:
@@ -733,15 +774,20 @@ class MarketPipeline:
                     if raw_value is not None and (not np.isscalar(raw_value) or pd.isna(raw_value)):
                         raw_value = None
                     
-                    if trans_value is not None and (not np.isscalar(trans_value) or pd.isna(trans_value)):
-                        trans_value = None
+                    if extra_value_tr_series is not None and date in extra_value_tr_series.index:
+                        value_tr = extra_value_tr_series.loc[date]
+                    else:
+                        value_tr = trans_value
+
+                    if value_tr is not None and (not np.isscalar(value_tr) or pd.isna(value_tr)):
+                        value_tr = None
                     
                     self.repository.upsert_series_data(
                         series_id=series_id,
                         date=record_date,
                         view=view_type,
                         value_raw=float(raw_value) if raw_value is not None else None,
-                        value_tr=float(trans_value) if trans_value is not None else None,
+                        value_tr=float(value_tr) if value_tr is not None else None,
                         z=float(z_val) if pd.notna(z_val) else None,
                         score=float(score_val) if pd.notna(score_val) else None
                     )

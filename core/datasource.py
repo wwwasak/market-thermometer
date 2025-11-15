@@ -380,32 +380,159 @@ class AKShareFetcher:
         except Exception as e:
             raise DataFetchError(f"Failed to fetch margin data: {e}")
     
-    def _fetch_north_flow(self, start_date: str, end_date: str) -> pd.Series:
+    def _fetch_north_flow(self, start_date: str, end_date: str) -> pd.DataFrame:
         """
-        获取北向资金流向数据
+        获取北向资金流向数据（成交额与占比）
         
-        @returns {pd.Series} 北向资金净流入（单位：亿元）
+        新规后东方财富接口将成交额字段调整为 DEAL_AMT，并将原 BUY_AMT / SELL_AMT 置空。
+        这里直接使用 DEAL_AMT 作为“北向成交额（亿元）”的原始值，同时结合上证指数与深证成指的
+        成交额总和估算全市场成交额，用于计算“成交额占比”。
+        
+        @returns {pd.DataFrame} 包含 value_raw（北向成交额，亿元）和 value_tr（北向成交额/全市场成交额）
         """
         try:
-            # 使用历史北向资金数据（最新接口名称）
-            df = self.ak.stock_hsgt_hist_em(symbol="沪股通")
-            
-            # 列名：['日期', '当日成交净买额', '当日买入成交额', '当日卖出成交额', '历史累计净买额', ...]
-            df['date'] = pd.to_datetime(df['日期'])
-            df = df.set_index('date')
-            df = df.sort_index()
-            
-            # 转换日期字符串为datetime用于过滤
             start_dt = pd.to_datetime(start_date)
             end_dt = pd.to_datetime(end_date)
-            df = df[(df.index >= start_dt) & (df.index <= end_dt)]
-            
-            # 当日成交净买额（单位：已经是亿元）
-            series = df['当日成交净买额'].astype(float)
-            
-            print(f"[OK] Fetched {len(series)} records for north flow")
-            return series
-            
+
+            if pd.isna(start_dt) or pd.isna(end_dt):
+                raise DataFetchError("Invalid start or end date for north flow fetch")
+
+            def _fetch_mutual_series(mutual_type: str) -> pd.Series:
+                url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+                params = {
+                    "reportName": "RPT_MUTUAL_DEAL_HISTORY",
+                    "columns": "TRADE_DATE,DEAL_AMT,BUY_AMT,SELL_AMT",
+                    "filter": f'(MUTUAL_TYPE="{mutual_type}")',
+                    "sortColumns": "TRADE_DATE",
+                    "sortTypes": "-1",
+                    "pageSize": "2000",
+                    "pageNumber": "1",
+                    "source": "WEB",
+                    "client": "WEB",
+                    "token": "70f12f0f4f091e459a279469fe49eca5",
+                }
+
+                records: List[Dict[str, Any]] = []
+                while True:
+                    resp = requests.get(url, params=params, timeout=10)
+                    resp.raise_for_status()
+                    data_json = resp.json()
+                    result = data_json.get("result")
+
+                    if not result:
+                        break
+
+                    data = result.get("data") or []
+                    if not data:
+                        break
+
+                    records.extend(data)
+
+                    page_number = int(params["pageNumber"])
+                    total_pages = int(result.get("pages", page_number))
+                    if page_number >= total_pages:
+                        break
+
+                    params["pageNumber"] = str(page_number + 1)
+                    time.sleep(0.2)
+
+                if not records:
+                    return pd.Series(dtype=float)
+
+                df_local = pd.DataFrame(records)
+                df_local["date"] = pd.to_datetime(df_local["TRADE_DATE"], errors="coerce")
+                df_local = df_local.dropna(subset=["date"])
+                df_local = df_local[(df_local["date"] >= start_dt) & (df_local["date"] <= end_dt)]
+                df_local = df_local.sort_values("date")
+
+                if df_local.empty:
+                    return pd.Series(dtype=float)
+
+                deal_amt_local = pd.to_numeric(df_local.get("DEAL_AMT"), errors="coerce")
+                fallback_buy = pd.to_numeric(df_local.get("BUY_AMT"), errors="coerce")
+                series_local = deal_amt_local.where(deal_amt_local.notna(), fallback_buy).fillna(0.0)
+                series_local = series_local / 100.0  # 百万元 -> 亿元
+
+                return pd.Series(series_local.values, index=df_local["date"], dtype=float)
+
+            # 分别获取沪股通与深股通成交额，并取总和
+            sh_series = _fetch_mutual_series("001")
+            sz_series = _fetch_mutual_series("003")
+
+            if len(sh_series) == 0 and len(sz_series) == 0:
+                # 若单腿均为空，尝试直接拉取“北向资金”合计（005）
+                combined_series = _fetch_mutual_series("005")
+                if len(combined_series) == 0:
+                    raise DataFetchError("No data returned for north flow (SH/SZ)")
+                value_raw = combined_series
+            else:
+                value_raw = sh_series.add(sz_series, fill_value=0.0)
+                value_raw = value_raw.sort_index()
+
+            def _fetch_market_amount(secid: str) -> pd.Series:
+                """
+                通过东方财富 push2 接口获取指定指数的成交额（单位：亿元）
+                """
+                params_market = {
+                    "fields1": "f1,f2,f3,f4,f5",
+                    "fields2": "f51,f52,f53,f54,f55,f56,f57",
+                    "secid": secid,
+                    "klt": "101",  # 日线
+                    "fqt": "1",
+                    "beg": start_dt.strftime("%Y%m%d"),
+                    "end": end_dt.strftime("%Y%m%d"),
+                }
+                headers = {"Referer": "https://quote.eastmoney.com/"}
+                resp_market = requests.get(
+                    "https://push2his.eastmoney.com/api/qt/stock/kline/get",
+                    params=params_market,
+                    headers=headers,
+                    timeout=10,
+                )
+                resp_market.raise_for_status()
+                data_market = resp_market.json().get("data", {})
+                klines = data_market.get("klines") or []
+                if not klines:
+                    raise DataFetchError(f"No kline data returned for secid {secid}")
+
+                records = {}
+                for item in klines:
+                    parts = item.split(",")
+                    if len(parts) < 7:
+                        continue
+                    date_key = pd.to_datetime(parts[0], errors="coerce")
+                    amount = pd.to_numeric(parts[6], errors="coerce")
+                    if pd.isna(date_key) or pd.isna(amount):
+                        continue
+                    records[date_key.normalize()] = amount / 1e8  # 转为亿元
+
+                return pd.Series(records, dtype=float).sort_index()
+
+            total_turnover = pd.Series(dtype=float)
+            try:
+                sh_turnover = _fetch_market_amount("1.000001")
+                sz_turnover = _fetch_market_amount("0.399001")
+                total_turnover = sh_turnover.add(sz_turnover, fill_value=0.0)
+            except Exception as market_exc:
+                print(f"[WARNING] Failed to fetch market turnover data: {market_exc}")
+                total_turnover = pd.Series(0.0, index=value_raw.index)
+
+            total_turnover = total_turnover.reindex(value_raw.index, fill_value=0.0)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                value_tr = value_raw / total_turnover.replace(0, np.nan)
+            value_tr = value_tr.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+            result = pd.DataFrame(
+                {
+                    "value_raw": value_raw,
+                    "value_tr": value_tr,
+                },
+                index=value_raw.index,
+            )
+
+            print(f"[OK] Fetched {len(result)} records for north flow (DEAL_AMT + ratio)")
+            return result
+
         except Exception as e:
             raise DataFetchError(f"Failed to fetch north flow data: {e}")
     
@@ -1200,22 +1327,30 @@ def validate_series(
     @param {int} max_gap_days - 最大允许间隔天数
     @returns {Tuple[bool, str]} (是否通过, 错误信息)
     """
-    if len(series) == 0:
+    if isinstance(series, pd.DataFrame):
+        if 'value_raw' in series.columns:
+            series_to_check = series['value_raw']
+        else:
+            series_to_check = series.iloc[:, 0]
+    else:
+        series_to_check = series
+
+    if len(series_to_check) == 0:
         return False, "Series is empty"
     
-    if len(series) < min_length:
-        return False, f"Series too short: {len(series)} < {min_length}"
+    if len(series_to_check) < min_length:
+        return False, f"Series too short: {len(series_to_check)} < {min_length}"
     
     # 检查时间间隔
-    if len(series) > 1:
-        time_diffs = series.index.to_series().diff().dt.days
+    if len(series_to_check) > 1:
+        time_diffs = series_to_check.index.to_series().diff().dt.days
         max_gap = time_diffs.max()
         
         if pd.notna(max_gap) and max_gap > max_gap_days:
             return False, f"Large gap detected: {max_gap} days"
     
     # 检查数据质量
-    if series.isna().all():
+    if series_to_check.isna().all():
         return False, "All values are NaN"
     
     return True, "OK"

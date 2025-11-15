@@ -69,6 +69,14 @@ class AutoDataFetcher:
                     obj.index = idx.tz_convert('UTC').tz_localize(None)
                 obj = obj.sort_index()
             return obj
+        elif isinstance(obj, pd.DataFrame):
+            idx = obj.index
+            if isinstance(idx, pd.DatetimeIndex):
+                obj = obj.copy()
+                if idx.tz is not None:
+                    obj.index = idx.tz_convert('UTC').tz_localize(None)
+                obj = obj.sort_index()
+            return obj
         elif isinstance(obj, tuple):
             return tuple(AutoDataFetcher._ensure_tz_naive(item) for item in obj)
         else:
@@ -161,6 +169,17 @@ class AutoDataFetcher:
                 if len(valid_series[0]) < expected_days * 0.5:
                     print(f"[WARNING] {code} 数据量偏少: {len(valid_series[0])} < {expected_days * 0.5}")
                 print(f"[OK] {code}: {len(valid_series[0])} 条记录 ({series_start.date()} 至 {series_end.date()})")
+            elif isinstance(series, pd.DataFrame):
+                if len(series) == 0:
+                    raise ValueError("获取到0条数据")
+                if not isinstance(series.index, pd.DatetimeIndex):
+                    raise ValueError("DataFrame 缺少日期索引")
+                series_start = series.index.min()
+                series_end = series.index.max()
+                expected_days = (end_date - start_date).days * 5 // 7
+                if len(series) < expected_days * 0.5:
+                    print(f"[WARNING] {code} 数据量偏少: {len(series)} < {expected_days * 0.5}")
+                print(f"[OK] {code}: {len(series)} 条记录 ({series_start.date()} 至 {series_end.date()})")
             else:
                 if not isinstance(series, pd.Series) or len(series) == 0:
                     raise ValueError("获取到0条数据")
@@ -259,7 +278,7 @@ class AutoDataFetcher:
                 valid_tuple = [s for s in series if isinstance(s, pd.Series) and len(s) > 0]
                 if valid_tuple:
                     results[code] = series
-            elif isinstance(series, pd.Series) and len(series) > 0:
+            elif isinstance(series, (pd.Series, pd.DataFrame)) and len(series) > 0:
                 results[code] = series
         
         # 打印统计
