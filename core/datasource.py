@@ -727,59 +727,93 @@ class AKShareFetcher:
     
     def _fetch_etf_flow(self, start_date: str, end_date: str) -> pd.Series:
         """
-        获取ETF资金流向
+        获取代表性宽基ETF的5日净申赎近似值
         
-        @returns {pd.Series} ETF主力净流入（计算5日滚动和）
+        通过东方财富个股资金流向接口抓取多只宽基ETF的“主力净流入”（万元），
+        汇总后转换为亿元，最后计算5日滚动和，近似代表净申赎额。
+        
+        @returns {pd.Series} 宽基ETF 5日滚动净申赎（亿元）
         """
-        try:
-            # 使用东方财富ETF每日资金流向数据
-            df = self.ak.fund_etf_fund_daily_em()
-            
-            # 列名：['基金代码', '基金简称', '类型', '2025-11-05-单位净值', ..., '日增长值', '日增长率', '市价', '累计额']
-            # 这个接口只返回最新一天的数据，不适合历史数据
-            
-            # 改用个股资金流向作为代理（获取沪深300ETF的资金流）
-            # 510300 是华泰柏瑞沪深300ETF
-            symbol = "510300"  # 沪深300ETF
-            
+        etf_candidates = [
+            {"symbol": "510300", "market": "sh", "label": "沪深300ETF"},
+            {"symbol": "510500", "market": "sh", "label": "中证500ETF"},
+            {"symbol": "159915", "market": "sz", "label": "创业板ETF"}
+        ]
+        
+        start_dt = pd.to_datetime(start_date)
+        end_dt = pd.to_datetime(end_date)
+        
+        combined_flow = None
+        fetch_errors = []
+        
+        for meta in etf_candidates:
             try:
-                # 尝试获取个股资金流向历史数据
-                df_flow = self.ak.stock_individual_fund_flow(stock=symbol, market="sh")
-                
-                # 转换日期
-                df_flow['date'] = pd.to_datetime(df_flow['日期'])
-                df_flow = df_flow.set_index('date')
-                df_flow = df_flow.sort_index()
-                
-                # 过滤日期范围
-                start_dt = pd.to_datetime(start_date)
-                end_dt = pd.to_datetime(end_date)
-                df_flow = df_flow[(df_flow.index >= start_dt) & (df_flow.index <= end_dt)]
-                
-                # 主力净流入（单位：万元，转换为亿元）
-                series = df_flow['主力净流入'].astype(float) / 10000
-                
-                print(f"[OK] Fetched {len(series)} records for ETF flow (510300 as proxy)")
-                return series
-                
-            except Exception as inner_e:
-                # 如果个股接口也失败，返回一个简化的估算
-                # 使用fund_etf_fund_daily_em的最新数据创建一个常数序列
-                print(f"[WARNING] Cannot fetch historical ETF flow, using latest snapshot")
-                
-                # 创建一个时间范围的空序列
-                start_dt = pd.to_datetime(start_date)
-                end_dt = pd.to_datetime(end_date)
-                date_range = pd.date_range(start=start_dt, end=end_dt, freq='D')
-                
-                # 返回0值序列（表示无数据）
-                series = pd.Series(0.0, index=date_range)
-                
-                print(f"[WARNING] Returned zero-filled series with {len(series)} records")
-                return series
+                df_flow = self.ak.stock_individual_fund_flow(
+                    stock=meta["symbol"],
+                    market=meta["market"]
+                )
+            except Exception as fetch_err:
+                fetch_errors.append(f"{meta['symbol']}: {fetch_err}")
+                continue
             
-        except Exception as e:
-            raise DataFetchError(f"Failed to fetch ETF flow data: {e}")
+            if df_flow is None or df_flow.empty:
+                fetch_errors.append(f"{meta['symbol']}: empty data")
+                continue
+            
+            flow_col = None
+            date_col = None
+            for col in df_flow.columns:
+                if '日期' in col:
+                    date_col = col
+                    break
+            if date_col is None:
+                date_col = df_flow.columns[0]
+            
+            flow_candidates = [col for col in df_flow.columns if '主力净流入' in col]
+            for col in flow_candidates:
+                if '净额' in col:
+                    flow_col = col
+                    break
+            if flow_col is None and flow_candidates:
+                flow_col = flow_candidates[0]
+            
+            if flow_col is None:
+                fetch_errors.append(f"{meta['symbol']}: missing 主力净流入 column")
+                continue
+            
+            df_flow['date'] = pd.to_datetime(df_flow[date_col])
+            df_flow = df_flow.set_index('date').sort_index()
+            df_flow = df_flow[(df_flow.index >= start_dt) & (df_flow.index <= end_dt)]
+            
+            if df_flow.empty:
+                fetch_errors.append(f"{meta['symbol']}: no rows within range")
+                continue
+            
+            series = pd.to_numeric(df_flow[flow_col], errors='coerce').dropna()
+            if series.empty:
+                fetch_errors.append(f"{meta['symbol']}: 主力净流入 empty after cleaning")
+                continue
+            
+            # 万元 -> 亿元
+            series = series / 10000.0
+            
+            if combined_flow is None:
+                combined_flow = series
+            else:
+                combined_flow = combined_flow.add(series, fill_value=0.0)
+            
+            print(f"[OK] Fetched {len(series)} records for ETF flow ({meta['label']})")
+        
+        if combined_flow is None or combined_flow.empty:
+            error_msg = "; ".join(fetch_errors) if fetch_errors else "unknown reason"
+            raise DataFetchError(f"Failed to fetch ETF flow data: {error_msg}")
+        
+        combined_flow = combined_flow.sort_index()
+        rolling_flow = combined_flow.rolling(window=5, min_periods=1).sum()
+        rolling_flow = rolling_flow[(rolling_flow.index >= start_dt) & (rolling_flow.index <= end_dt)]
+        
+        print(f"[OK] Aggregated ETF flow into 5D rolling series with {len(rolling_flow)} records")
+        return rolling_flow
 
 
 class AKForexFetcher:
