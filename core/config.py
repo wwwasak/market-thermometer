@@ -157,8 +157,8 @@ class Config:
             
             # ============ 数据库配置 ============
             "database": {
-                # GUI与流水线默认共用 data/market_thermo.db，确保同一数据库
-                "path": os.getenv("DATABASE_PATH", "data/market_thermo.db")
+                # GUI与流水线默认共用 data/market_thermo_3years_auto.db，确保同一数据库
+                "path": os.getenv("DATABASE_PATH", "data/market_thermo_3years_auto.db")
             },
             
             # ============ 日志配置 ============

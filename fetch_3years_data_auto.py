@@ -81,6 +81,43 @@ class AutoDataFetcher:
             return tuple(AutoDataFetcher._ensure_tz_naive(item) for item in obj)
         else:
             return obj
+
+    def _collect_pair_components(
+        self,
+        indicators: List[Dict[str, Any]],
+        market: str
+    ) -> List[Dict[str, Any]]:
+        """
+        收集配对指标的组件配置，便于单独抓取
+
+        @param {List[Dict[str, Any]]} indicators - 指标配置列表
+        @param {str} market - 市场代码
+        @returns {List[Dict[str, Any]]} 组件配置列表
+        """
+        components: List[Dict[str, Any]] = []
+        seen_codes = set()
+
+        for indicator in indicators:
+            if not indicator.get('pair'):
+                continue
+
+            parent_code = indicator.get('code')
+            for comp in indicator.get('components', []):
+                comp_code = comp.get('code')
+                if not comp_code or comp_code in seen_codes:
+                    continue
+
+                comp_cfg = comp.copy()
+                comp_cfg.setdefault('name', comp_code)
+                comp_cfg.setdefault('direction', comp.get('direction', indicator.get('direction', 'down_good')))
+                comp_cfg.setdefault('transform', comp.get('transform', 'raw'))
+                comp_cfg.setdefault('market', market)
+                comp_cfg.setdefault('role', 'pair_component')
+                comp_cfg['parent_pair'] = parent_code
+                components.append(comp_cfg)
+                seen_codes.add(comp_code)
+
+        return components
     
     def verify_all_indicators_auto(self, market: str) -> Dict[str, bool]:
         """
@@ -225,11 +262,13 @@ class AutoDataFetcher:
         main_indicators = self.config.get(f'indicators.{market}.main', [])
         observer_indicators = self.config.get(f'indicators.{market}.observers', [])
         all_indicators = main_indicators + observer_indicators
+        pair_components = self._collect_pair_components(all_indicators, market)
         
         # 过滤掉需要CSV导入的指标
         auto_indicators = []
-        manual_indicators = []
+        manual_indicators: List[Dict[str, Any]] = []
         skipped_indicators = []
+        auto_codes = set()
 
         for ind in all_indicators:
             source = ind.get('source')
@@ -241,20 +280,54 @@ class AutoDataFetcher:
 
             source_lower = source.lower() if isinstance(source, str) else source
             if source_lower in ['csv', 'manual']:
-                manual_indicators.append(code)
+                manual_indicators.append({
+                    'code': code,
+                    'display': code,
+                    'reason': '数据源为csv/manual，需要手动导入'
+                })
                 continue
 
             auto_indicators.append(ind)
+            auto_codes.add(code)
+
+        # 追加配对组件
+        if pair_components:
+            print(f"[INFO] 检测到 {len(pair_components)} 个配对组件需要独立抓取: "
+                  f"{', '.join(comp['code'] for comp in pair_components)}")
+
+        for comp in pair_components:
+            code = comp.get('code')
+            source = comp.get('source')
+
+            if not source:
+                skipped_indicators.append(code)
+                continue
+
+            source_lower = source.lower() if isinstance(source, str) else source
+            if source_lower in ['csv', 'manual']:
+                manual_indicators.append({
+                    'code': code,
+                    'display': f"{code}(pair:{comp.get('parent_pair')})",
+                    'reason': '数据源为csv/manual，需要手动导入'
+                })
+                continue
+
+            if code in auto_codes:
+                continue
+
+            auto_indicators.append(comp)
+            auto_codes.add(code)
         
         print(f"\n[INFO] 总指标数: {len(all_indicators)}")
         print(f"[INFO] 可自动获取: {len(auto_indicators)}")
         print(f"[INFO] 需要手动导入: {len(manual_indicators)}")
         if manual_indicators:
-            print(f"[WARNING] 以下指标需要手动导入: {', '.join(manual_indicators)}")
-            for code in manual_indicators:
+            display_names = ', '.join(item['display'] for item in manual_indicators)
+            print(f"[WARNING] 以下指标需要手动导入: {display_names}")
+            for item in manual_indicators:
                 self.fetch_stats['missing'].append({
-                    'code': code,
-                    'reason': '数据源为csv/manual，需要手动导入'
+                    'code': item['code'],
+                    'reason': item.get('reason', '数据源为csv/manual，需要手动导入')
                 })
         if skipped_indicators:
             print(f"[INFO] 以下指标无需单独获取（派生或依赖基础指标）: {', '.join(skipped_indicators)}")
