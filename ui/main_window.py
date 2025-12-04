@@ -11,11 +11,11 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
-from PyQt6.QtCore import QDate, QModelIndex, Qt, pyqtSignal
+from PyQt6.QtCore import QDate, QModelIndex, Qt, pyqtSignal, QThread
 from PyQt6.QtGui import QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QApplication,
@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QStatusBar,
+    QMessageBox,
     QVBoxLayout,
     QWidget,
 )
@@ -39,6 +40,43 @@ from core.config import Config
 from storage.repository import Repository
 from ui.charts import IndicatorChartWidget, IndicatorDisplayConfig
 from ui.styles import MAIN_WINDOW_QSS
+
+
+class ManualFetchWorker(QThread):
+    """后台线程：执行手动增量获取"""
+
+    completed = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(
+        self,
+        database_url: str,
+        markets: List[str],
+        start_date: datetime,
+        end_date: datetime,
+        parent: Optional[QWidget] = None,
+    ):
+        super().__init__(parent)
+        self.database_url = database_url
+        self.markets = markets
+        self.start_date = start_date
+        self.end_date = end_date
+
+    def run(self) -> None:  # pragma: no cover - 线程执行体
+        try:
+            from core.pipeline import MarketPipeline
+
+            result: Dict[str, Dict] = {}
+            for market in self.markets:
+                pipeline = MarketPipeline(market=market, database_url=self.database_url)
+                result[market] = pipeline.run_daily_pipeline(
+                    start_date=self.start_date,
+                    end_date=self.end_date,
+                    incremental=True,
+                )
+            self.completed.emit(result)
+        except Exception as exc:  # pragma: no cover
+            self.failed.emit(str(exc))
 
 
 class IndicatorListModel(QStandardItemModel):
@@ -61,6 +99,7 @@ class IndicatorControlPanel(QWidget):
 
     indicator_selected = pyqtSignal(dict)
     filters_changed = pyqtSignal()
+    manual_fetch_requested = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -96,6 +135,10 @@ class IndicatorControlPanel(QWidget):
         self.reset_date_btn = QPushButton("重置日期")
         self.reset_date_btn.clicked.connect(self._reset_date_range)
 
+        self.manual_fetch_btn = QPushButton("手动获取最新数据")
+        self.manual_fetch_btn.setToolTip("触发增量流水线，自动获取最近7个交易日数据")
+        self.manual_fetch_btn.clicked.connect(self._emit_manual_fetch)
+
         # 指标列表
         self.list_view = QListView()
         self.list_view.setSelectionMode(QListView.SelectionMode.SingleSelection)
@@ -129,6 +172,7 @@ class IndicatorControlPanel(QWidget):
         list_label.setStyleSheet("font-weight: 600;")
         layout.addWidget(list_label)
         layout.addWidget(self.list_view, stretch=1)
+        layout.addWidget(self.manual_fetch_btn)
 
     # -- 基本操作 --
     def set_indicators(self, indicators: List[Dict]) -> None:
@@ -145,6 +189,12 @@ class IndicatorControlPanel(QWidget):
     def selected_view(self) -> str:
         return "daily" if self.view_combo.currentIndex() == 0 else "weekly"
 
+    def selected_market_code(self) -> Optional[str]:
+        market_text = self.market_combo.currentText()
+        if market_text == "全部市场":
+            return None
+        return market_text
+
     def selected_date_range(self) -> Tuple[Optional[date], Optional[date]]:
         start = self.start_date_edit.date().toPyDate()
         end = self.end_date_edit.date().toPyDate()
@@ -158,6 +208,9 @@ class IndicatorControlPanel(QWidget):
             "role": self.role_combo.currentText(),
             "search": self.search_edit.text(),
         }
+
+    def set_manual_fetch_enabled(self, enabled: bool) -> None:
+        self.manual_fetch_btn.setEnabled(enabled)
 
     # -- 内部逻辑 --
     def _build_group(self, title: str, widget: QWidget) -> QWidget:
@@ -187,9 +240,16 @@ class IndicatorControlPanel(QWidget):
         if meta:
             self.indicator_selected.emit(meta)
 
+    def _emit_manual_fetch(self) -> None:
+        self.manual_fetch_requested.emit()
+
 
 class ThermometerMainWindow(QMainWindow):
     """双市场温度计主窗口"""
+
+    MANUAL_FETCH_DAYS = 7
+    MANUAL_FETCH_BUFFER = 5
+    MIN_MANUAL_FETCH_DAYS = 30
 
     def __init__(
         self,
@@ -206,7 +266,10 @@ class ThermometerMainWindow(QMainWindow):
             else:
                 database_url = f"sqlite:///{db_path}"
 
+        self.database_url = database_url
         self.repository = Repository(database_url)
+        self._manual_fetch_worker: Optional[ManualFetchWorker] = None
+        self._current_indicator: Optional[Dict] = None
 
         self.setWindowTitle("双市场温度计 · 图表终端")
         self.resize(1400, 840)
@@ -214,6 +277,7 @@ class ThermometerMainWindow(QMainWindow):
         self.control_panel = IndicatorControlPanel()
         self.control_panel.indicator_selected.connect(self._on_indicator_selected)
         self.control_panel.filters_changed.connect(self._apply_filters)
+        self.control_panel.manual_fetch_requested.connect(self._on_manual_fetch_requested)
 
         self.chart_widget = IndicatorChartWidget()
 
@@ -329,6 +393,70 @@ class ThermometerMainWindow(QMainWindow):
             else:
                 lamp = "黄灯"
         self.lamp_label.setText(f"灯色: {lamp}")
+        self._current_indicator = meta
+
+    # -- 手动获取逻辑 --
+    def _on_manual_fetch_requested(self) -> None:
+        if self._manual_fetch_worker and self._manual_fetch_worker.isRunning():
+            QMessageBox.information(self, "提示", "已有手动获取任务在执行，请稍候。")
+            return
+
+        selected_market = self.control_panel.selected_market_code()
+        markets = ["CN", "US"] if selected_market is None else [selected_market]
+
+        end_dt = datetime.now()
+        lookback_days = max(
+            self.MANUAL_FETCH_DAYS + self.MANUAL_FETCH_BUFFER,
+            self.MIN_MANUAL_FETCH_DAYS,
+        )
+        start_dt = end_dt - timedelta(days=lookback_days)
+
+        self.statusBar().showMessage("手动获取数据中，请稍候…")
+        self.control_panel.set_manual_fetch_enabled(False)
+
+        self._manual_fetch_worker = ManualFetchWorker(
+            database_url=self.database_url,
+            markets=markets,
+            start_date=start_dt,
+            end_date=end_dt,
+        )
+        self._manual_fetch_worker.completed.connect(self._on_manual_fetch_completed)
+        self._manual_fetch_worker.failed.connect(self._on_manual_fetch_failed)
+        self._manual_fetch_worker.finished.connect(self._clear_manual_worker)
+        self._manual_fetch_worker.start()
+
+    def _on_manual_fetch_completed(self, result: Dict[str, Dict]) -> None:
+        self.statusBar().showMessage("手动获取完成", 3000)
+        self.control_panel.set_manual_fetch_enabled(True)
+        self._refresh_current_indicator()
+
+        summary_lines = []
+        for market, payload in result.items():
+            if payload.get("success"):
+                records = payload.get("records_saved", 0)
+                date_range = payload.get("date_range")
+                if date_range:
+                    start_str = date_range[0].strftime("%Y-%m-%d")
+                    end_str = date_range[1].strftime("%Y-%m-%d")
+                    summary_lines.append(f"{market}: ✓ {records} 条 ({start_str} → {end_str})")
+                else:
+                    summary_lines.append(f"{market}: ✓ {records} 条")
+            else:
+                summary_lines.append(f"{market}: ✗ {payload.get('error', 'unknown error')}")
+
+        QMessageBox.information(self, "手动获取完成", "\n".join(summary_lines))
+
+    def _on_manual_fetch_failed(self, message: str) -> None:
+        self.statusBar().showMessage("手动获取失败", 5000)
+        self.control_panel.set_manual_fetch_enabled(True)
+        QMessageBox.critical(self, "手动获取失败", message)
+
+    def _clear_manual_worker(self) -> None:
+        self._manual_fetch_worker = None
+
+    def _refresh_current_indicator(self) -> None:
+        if self._current_indicator:
+            self._on_indicator_selected(self._current_indicator)
 
 
 def launch_gui(database_url: Optional[str] = None):
