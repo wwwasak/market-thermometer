@@ -87,12 +87,35 @@ class MarketPipeline:
         self._augment_indicator_components()
         
         # 获取市场特定参数
+        # 配置确认层参数
+        soft_confirm_codes = []
+        soft_confirm_weights = {}
+        hard_veto_codes = []
+        
+        if self.market == 'US':
+            # US市场的确认层配置
+            soft_confirm_codes = ['IWM_SPY_SOFT', 'HYG_IEF_SOFT', 'PAIR_TWEX_DXY', 'PAIR_CNH_CNY']
+            soft_confirm_weights = self.config.get('soft_confirm_weights.US', {})
+            hard_veto_codes = ['HY_OAS_JUMP', 'VIX_EXTREME']
+        elif self.market == 'CN':
+            # CN市场的确认层配置
+            soft_confirm_codes = ['PAIR_CNH_CNY', 'PAIR_TWEX_DXY']
+            soft_confirm_weights = self.config.get('soft_confirm_weights.CN', {})
+            hard_veto_codes = ['ETF_NETFLOW_5D']
+        
         self.market_config = {
             'z_type': self.config.get('z_type', 'Z').upper(),  # 确保大写
             'z_window': self.config.get('z_window', 60),
             'green_threshold': self.config.get('lamp.green_threshold', 60),
             'red_threshold': self.config.get('lamp.red_threshold', 40),
-            'confirm_layer': self.config.get('confirm_layer', {})
+            'confirm_layer': {
+                'hard_veto_codes': hard_veto_codes,
+                'soft_confirm_codes': soft_confirm_codes,
+                'soft_confirm_weights': soft_confirm_weights,
+                'soft_confirm_green': self.config.get('soft_confirm_thresholds.green', 1.6),
+                'soft_confirm_red': self.config.get('soft_confirm_thresholds.red', 0.8),
+                'pair_rule': self.config.get('pair_rule', 'A')
+            }
         }
         
         # 流水线状态
@@ -505,13 +528,13 @@ class MarketPipeline:
         self,
         transformed_data: Dict[str, pd.Series],
         view_type: str = 'daily'
-    ) -> pd.DataFrame:
+    ) -> Tuple[pd.DataFrame, pd.Series]:
         """
         计算评分和灯号
         
         @param {Dict[str, pd.Series]} transformed_data - 转换后的数据
         @param {str} view_type - 视图类型（'daily' 或 'weekly'）
-        @returns {pd.DataFrame} 评分结果
+        @returns {Tuple[pd.DataFrame, pd.Series]} (评分结果DataFrame, 综合评分Series)
         """
         print(f"\n[INFO] 计算 {view_type} 评分...")
         
@@ -523,12 +546,40 @@ class MarketPipeline:
             and self.indicator_lookup.get(code, {}).get('include_in_scoring', True)
         ]
 
-        # 对齐所有序列到统一的日期索引（取并集）
-        series_list = [transformed_data[code] for code in scoring_codes]
-
-        if not series_list:
+        if not scoring_codes:
             raise PipelineError("No valid data for scoring")
 
+        # **关键修复：先对每个序列独立计算Z分数和评分，然后再对齐**
+        # 这样可以避免对齐时前面大量NaN导致MADZ无法计算的问题
+        
+        z_dict = {}
+        score_dict = {}
+        
+        # 对每个指标独立计算Z分数和评分
+        for code in scoring_codes:
+            series = transformed_data[code]
+            indicator = self.indicator_lookup.get(code, {})
+            
+            direction = indicator.get('direction', 'up_good')
+            z_type = indicator.get('z_type', self.market_config.get('z_type', 'Z'))
+            z_window = indicator.get('z_window', self.market_config.get('z_window', 60))
+            
+            # 计算Z分数
+            z = standardize_with_direction(
+                series,
+                direction=direction,
+                z_type=z_type,
+                window=z_window
+            )
+            
+            # 计算评分
+            score = score_from_z(z, center=50, scale=10)
+            
+            z_dict[code] = z
+            score_dict[code] = score
+        
+        # 现在对齐所有Z分数和评分到统一的日期索引
+        series_list = [transformed_data[code] for code in scoring_codes]
         all_dates = series_list[0].index
         for s in series_list[1:]:
             all_dates = all_dates.union(s.index)
@@ -540,6 +591,7 @@ class MarketPipeline:
         all_dates = all_dates.tz_localize(None)
         all_dates = all_dates.sort_values()
 
+        # 对齐原始转换数据
         df = pd.DataFrame(
             {code: transformed_data[code].reindex(all_dates) for code in scoring_codes},
             index=all_dates
@@ -549,24 +601,9 @@ class MarketPipeline:
         if view_type == 'weekly':
             print("[INFO] 重采样到周度...")
             df = df.resample('W-FRI').last()
-        
-        # 准备批量标准化配置
-        data_dict = {code: df[code] for code in df.columns}
-        config_dict = {}
-        
-        for code in df.columns:
-            indicator = self.indicator_lookup.get(code, {})
-            config_dict[code] = {
-                'direction': indicator.get('direction', 'up_good'),
-                'z_type': indicator.get('z_type', self.market_config.get('z_type', 'Z')),
-                'z_window': indicator.get('z_window', self.market_config.get('z_window', 60))
-            }
-        
-        # 批量标准化（返回字典）
-        z_dict = batch_standardize(data_dict, config_dict)
-        
-        # 批量评分（返回字典）
-        score_dict = batch_score(z_dict, center=50, scale=10)
+            # 也需要重采样Z分数和评分
+            z_dict = {code: z.resample('W-FRI').last() for code, z in z_dict.items()}
+            score_dict = {code: score.resample('W-FRI').last() for code, score in score_dict.items()}
         
         # 合并z-score和score到DataFrame
         result_data = {}
@@ -576,12 +613,78 @@ class MarketPipeline:
         
         result_df = pd.DataFrame(result_data)
         
-        print(f"[OK] 完成 {len(config_dict)} 个指标的评分")
+        # 计算综合评分（只用main角色的指标）
+        main_indicators = [
+            ind for ind in self.indicators 
+            if ind.get('role') == 'main'
+        ]
+        
+        composite_score = pd.Series(index=result_df.index, dtype=float)
+        
+        if main_indicators:
+            # 获取当前市场和风格的权重
+            active_style = self.config.get(f"active_style.{self.market}", "Balanced")
+            weights_full = self.config.get(f"style_weights.{self.market}.{active_style}", [])
+            
+            # 只使用有评分数据的main指标（至少要有部分数据，不要求全部非空）
+            main_codes_with_scores = []
+            for ind in main_indicators:
+                code = ind['code']
+                if code in score_dict:
+                    score_series = score_dict[code]
+                    # 只要有任何非空值就算有数据
+                    if isinstance(score_series, pd.Series) and len(score_series.dropna()) > 0:
+                        main_codes_with_scores.append(code)
+            
+            print(f"[INFO] 主要指标: {len(main_indicators)}个配置, {len(main_codes_with_scores)}个有数据")
+            
+            if len(main_codes_with_scores) == 0:
+                print(f"[WARN] 所有主要指标均无数据，无法计算综合评分")
+                print(f"[WARN] 可能原因：时间窗口太短，导致指标计算失败")
+            else:
+                print(f"[INFO] 有数据的指标: {main_codes_with_scores}")
+                
+                # 构建评分矩阵（只用有数据的指标）
+                score_matrix = pd.DataFrame(
+                    {code: score_dict.get(code, pd.Series(dtype=float)) for code in main_codes_with_scores}
+                )
+                
+                # 根据指标在main_indicators中的位置提取对应权重
+                weights = []
+                for code in main_codes_with_scores:
+                    # 找到这个指标在main_indicators中的位置
+                    idx = next((i for i, ind in enumerate(main_indicators) if ind['code'] == code), None)
+                    if idx is not None and idx < len(weights_full):
+                        weights.append(weights_full[idx])
+                    else:
+                        # 如果找不到对应权重，使用平均值
+                        avg_weight = sum(weights_full) / len(weights_full) if weights_full else 1.0
+                        weights.append(avg_weight)
+                        print(f"[WARN] {code} 使用默认权重 {avg_weight:.1f}")
+                
+                if len(weights) != len(main_codes_with_scores):
+                    print(f"[ERROR] 权重提取失败: 需要{len(main_codes_with_scores)}个，得到{len(weights)}个")
+                elif len(weights) > 0:
+                    from core.scoring import weighted_score
+                    
+                    # 注意：weighted_score会在每个时间点只使用那些非空的指标进行加权
+                    composite_score = weighted_score(score_matrix, weights, normalize=True)
+                    
+                    # 检查综合评分是否有效
+                    valid_count = composite_score.notna().sum()
+                    if valid_count > 0:
+                        print(f"[INFO] 计算综合评分: 使用 {active_style} 风格，{len(main_codes_with_scores)} 个主要指标")
+                        print(f"[INFO] 综合评分: {valid_count}/{len(composite_score)} 个有效值")
+                        print(f"[INFO] 综合评分范围: {composite_score.min():.2f} - {composite_score.max():.2f}")
+                    else:
+                        print(f"[WARN] 综合评分全部为NaN")
+        
+        print(f"[OK] 完成 {len(scoring_codes)} 个指标的评分")
         if len(result_df) > 0:
             print(f"[INFO] 数据时间范围: {result_df.index.min()} 至 {result_df.index.max()}")
             print(f"[INFO] 总共 {len(result_df)} 个时间点")
         
-        return result_df
+        return result_df, composite_score
     
     def apply_confirm_layer(
         self,
@@ -675,6 +778,7 @@ class MarketPipeline:
         transformed_data: Dict[str, pd.Series],
         scores: pd.DataFrame,
         confirm_results: Dict[str, pd.Series],
+        composite_score: pd.Series,
         view_type: str = 'daily'
     ) -> int:
         """
@@ -684,6 +788,7 @@ class MarketPipeline:
         @param {Dict[str, pd.Series]} transformed_data - 转换后数据
         @param {pd.DataFrame} scores - 评分结果
         @param {Dict[str, pd.Series]} confirm_results - 确认层结果
+        @param {pd.Series} composite_score - 综合评分
         @param {str} view_type - 视图类型
         @returns {int} 保存的记录数
         """
@@ -719,6 +824,20 @@ class MarketPipeline:
         # 2. 保存时间序列数据
         all_series_codes = set(raw_data.keys()) | set(transformed_data.keys())
         
+        print(f"[DEBUG] 准备保存 {len(all_series_codes)} 个序列的数据")
+        print(f"[DEBUG] scores DataFrame: {scores.shape}, 列名前10个: {list(scores.columns)[:10]}")
+        print(f"[DEBUG] scores索引类型: {type(scores.index)}, 前3个: {list(scores.index[:3])}")
+        
+        # 检查评分数据是否有效
+        score_cols = [col for col in scores.columns if '_score' in col]
+        if score_cols:
+            sample_col = score_cols[0]
+            non_nan = scores[sample_col].notna().sum()
+            if non_nan > 0:
+                print(f"[DEBUG] 样例评分列 {sample_col}: {non_nan}/{len(scores)} 个有效值, 范围: {scores[sample_col].min():.2f}-{scores[sample_col].max():.2f}")
+            else:
+                print(f"[WARN] 样例评分列 {sample_col}: 全部为NaN!")
+        
         for code in all_series_codes:
             series_id = code_to_series_id.get(code)
             if series_id is None:
@@ -748,8 +867,34 @@ class MarketPipeline:
             else:
                 raw_series = pd.Series(index=target_index, dtype=float)
             
-            for date, trans_value in trans_series.items():
+            # 调试：检查score列
+            score_col = f"{code}_score"
+            z_col = f"{code}_z"
+            has_score_col = score_col in scores.columns
+            has_z_col = z_col in scores.columns
+            
+            if not has_score_col and not has_z_col:
+                # 这是正常的，对于observer或component角色的指标
+                pass
+            
+            saved_count = 0
+            score_saved = 0
+            
+            # 关键修复：统一索引类型以确保匹配
+            # 将trans_series的索引和scores的索引都转换为Timestamp
+            trans_dates = pd.to_datetime(trans_series.index)
+            scores_dates = pd.to_datetime(scores.index)
+            
+            for i, date in enumerate(trans_series.index):
                 try:
+                    trans_value = trans_series.iloc[i]
+                    
+                    # 将日期转换为Timestamp以便在scores中查找
+                    lookup_date = pd.Timestamp(date)
+                    if lookup_date.tz is not None:
+                        lookup_date = lookup_date.tz_localize(None)
+                    
+                    # 准备record_date
                     if isinstance(date, pd.Timestamp):
                         record_date = date.date()
                     elif isinstance(date, datetime):
@@ -757,18 +902,36 @@ class MarketPipeline:
                     else:
                         record_date = date
                     
-                    # 获取对应的评分
-                    score_col = f"{code}_score"
-                    z_col = f"{code}_z"
-                    
+                    # 获取对应的评分（使用Timestamp查找）
                     score_val = None
                     z_val = None
                     
-                    if score_col in scores.columns and date in scores.index:
-                        score_val = scores.loc[date, score_col]
+                    if has_score_col:
+                        # 尝试精确匹配
+                        try:
+                            if lookup_date in scores.index:
+                                score_val = scores.loc[lookup_date, score_col]
+                            else:
+                                # 尝试使用isin查找最接近的日期
+                                mask = scores.index == lookup_date
+                                if mask.any():
+                                    score_val = scores.loc[mask, score_col].iloc[0]
+                        except Exception as e:
+                            pass
+                        
+                        if pd.notna(score_val):
+                            score_saved += 1
                     
-                    if z_col in scores.columns and date in scores.index:
-                        z_val = scores.loc[date, z_col]
+                    if has_z_col:
+                        try:
+                            if lookup_date in scores.index:
+                                z_val = scores.loc[lookup_date, z_col]
+                            else:
+                                mask = scores.index == lookup_date
+                                if mask.any():
+                                    z_val = scores.loc[mask, z_col].iloc[0]
+                        except:
+                            pass
                     
                     raw_value = raw_series.loc[date] if date in raw_series.index else None
                     if raw_value is not None and (not np.isscalar(raw_value) or pd.isna(raw_value)):
@@ -793,10 +956,15 @@ class MarketPipeline:
                     )
                     
                     total_saved += 1
+                    saved_count += 1
                 
                 except Exception as e:
-                    print(f"[WARN] 保存 {code} 数据失败: {e}")
+                    print(f"[WARN] 保存 {code} 数据失败 ({date}): {e}")
                     continue
+            
+            # 输出每个指标的保存统计
+            if has_score_col or has_z_col:
+                print(f"[DEBUG] {code}: 总共{saved_count}条，其中{score_saved}条有评分数据")
         
         # 3. 保存Regime数据
         if 'final' in confirm_results:
@@ -807,30 +975,58 @@ class MarketPipeline:
             # 计算当前参数的哈希
             params_hash = self._calculate_params_hash()
             
+            # 计算regime
+            attack_threshold = self.config.get('regime.attack_threshold', 70)
+            defense_threshold = self.config.get('regime.defense_threshold', 40)
+            persistence = self.config.get('regime.persistence_days' if view_type == 'daily' else 'regime.persistence_weeks', 0)
+            
+            regime_series = regime_from_score(
+                composite_score,
+                attack_threshold=attack_threshold,
+                defense_threshold=defense_threshold,
+                persistence=persistence
+            )
+            
             for date in final_lamp.index:
                 try:
+                    # 确保date是有效的日期对象
                     if isinstance(date, pd.Timestamp):
                         record_date = date.date()
                     elif isinstance(date, datetime):
                         record_date = date.date()
+                    elif isinstance(date, str):
+                        record_date = pd.to_datetime(date).date()
                     else:
-                        record_date = date
+                        # 尝试转换
+                        try:
+                            record_date = pd.to_datetime(date).date()
+                        except:
+                            print(f"[WARN] 无法转换日期: {date}, type: {type(date)}")
+                            continue
                     
-                    # 这里简化处理，实际需要计算regime
-                    regime_val = 'Balanced'  # 临时值
+                    # 获取regime值
+                    regime_val = regime_series.loc[date] if date in regime_series.index else 'Balanced'
+                    comp_score_val = composite_score.loc[date] if date in composite_score.index else None
+                    
+                    # 获取灯色值（确保使用正确的访问方式）
+                    final_lamp_val = final_lamp.loc[date] if date in final_lamp.index else 'Y'
+                    soft_lamp_val = soft_confirm_lamp.loc[date] if date in soft_confirm_lamp.index else 'Y'
+                    hard_lamp_val = hard_veto_lamp.loc[date] if date in hard_veto_lamp.index else 'Y'
                     
                     self.repository.upsert_regime(
                         date=record_date,
                         market=self.market,
                         view=view_type,
                         regime=regime_val,
-                        lamp_final=final_lamp.loc[date],
-                        lamp_soft=soft_confirm_lamp.get(date, 'Y'),
-                        lamp_hard=hard_veto_lamp.get(date, 'G'),
+                        composite_score=float(comp_score_val) if pd.notna(comp_score_val) else None,
+                        lamp_final=final_lamp_val,
+                        lamp_soft=soft_lamp_val,
+                        lamp_hard=hard_lamp_val,
                         params_hash=params_hash
                     )
                 
                 except Exception as e:
+                    print(f"[WARN] 保存regime数据失败 ({date}): {e}")
                     continue
             
             # 保存聚合灯色历史
@@ -847,12 +1043,21 @@ class MarketPipeline:
                     try:
                         if pd.isna(lamp_value):
                             continue
+                        
+                        # 确保date是有效的日期对象
                         if isinstance(date, pd.Timestamp):
                             record_date = date.date()
                         elif isinstance(date, datetime):
                             record_date = date.date()
+                        elif isinstance(date, str):
+                            record_date = pd.to_datetime(date).date()
                         else:
-                            record_date = date
+                            # 尝试转换
+                            try:
+                                record_date = pd.to_datetime(date).date()
+                            except:
+                                print(f"[WARN] 无法转换灯色历史日期: {date}, type: {type(date)}")
+                                continue
 
                         self.repository.upsert_lamp_history(
                             date=record_date,
@@ -863,7 +1068,7 @@ class MarketPipeline:
                             lamp=lamp_value
                         )
                     except Exception as e:
-                        print(f"[WARN] 记录灯色历史失败 ({source_code}): {e}")
+                        print(f"[WARN] 记录灯色历史失败 ({source_code}, {date}): {e}")
         
         print(f"[OK] 保存了 {total_saved} 条记录到数据库")
         
@@ -913,14 +1118,14 @@ class MarketPipeline:
             )
             
             # 3. 计算评分
-            scores = self.calculate_scores(transformed_data, view_type='daily')
+            scores, composite_score = self.calculate_scores(transformed_data, view_type='daily')
             
             # 4. 应用确认层
             confirm_results = self.apply_confirm_layer(scores, view_type='daily')
             
             # 5. 保存到数据库
             saved_count = self.save_to_database(
-                raw_data, transformed_data, scores, confirm_results, view_type='daily'
+                raw_data, transformed_data, scores, confirm_results, composite_score, view_type='daily'
             )
             
             self.last_update = datetime.now()
@@ -984,11 +1189,11 @@ class MarketPipeline:
                 start_date,
                 end_date
             )
-            scores = self.calculate_scores(transformed_data, view_type='weekly')
+            scores, composite_score = self.calculate_scores(transformed_data, view_type='weekly')
             confirm_results = self.apply_confirm_layer(scores, view_type='weekly')
             
             saved_count = self.save_to_database(
-                raw_data, transformed_data, scores, confirm_results, view_type='weekly'
+                raw_data, transformed_data, scores, confirm_results, composite_score, view_type='weekly'
             )
             
             result = {

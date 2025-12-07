@@ -324,15 +324,20 @@ def weighted_score(
     """
     计算加权总分
     
+    对于每个时间点，只使用有效（非NaN）的指标进行加权，并动态归一化权重
+    
     @param {pd.DataFrame} scores - 评分矩阵（每列是一个指标）
     @param {list} weights - 权重列表（与列顺序对应）
     @param {bool} normalize - 是否归一化权重到总和为1
     @returns {pd.Series} 加权总分
     
     @example
-    >>> df = pd.DataFrame({'ind1': [70, 60], 'ind2': [50, 80]})
+    >>> df = pd.DataFrame({'ind1': [70, 60, np.nan], 'ind2': [50, 80, 90]})
     >>> weights = [0.6, 0.4]
     >>> total = weighted_score(df, weights)
+    # 第1行: 70*0.6 + 50*0.4 = 62
+    # 第2行: 60*0.6 + 80*0.4 = 68
+    # 第3行: 90*1.0 = 90 (只有ind2有值，权重归一化为1.0)
     """
     if len(weights) != len(scores.columns):
         raise ValueError(f"Weights length {len(weights)} must match columns {len(scores.columns)}")
@@ -342,10 +347,31 @@ def weighted_score(
     if normalize:
         weights_array = weights_array / weights_array.sum()
     
-    # 计算加权和（忽略NaN）
-    weighted = (scores * weights_array).sum(axis=1, skipna=True)
+    # 对每一行单独计算加权和，动态处理NaN
+    def weighted_sum_row(row):
+        """对单行计算加权和，只使用非NaN值并重新归一化权重"""
+        valid_mask = row.notna()
+        
+        if not valid_mask.any():
+            # 全部为NaN，返回NaN
+            return np.nan
+        
+        # 只使用有效的值和对应的权重
+        valid_values = row[valid_mask].values
+        valid_weights = weights_array[valid_mask.values]
+        
+        # 重新归一化权重
+        normalized_weights = valid_weights / valid_weights.sum()
+        
+        # 计算加权和
+        weighted_sum = (valid_values * normalized_weights).sum()
+        
+        return weighted_sum
     
-    return weighted
+    # 应用到每一行
+    result = scores.apply(weighted_sum_row, axis=1)
+    
+    return result
 
 
 def check_extreme_jump(

@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QStatusBar,
     QMessageBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -39,6 +40,7 @@ from PyQt6.QtWidgets import (
 from core.config import Config
 from storage.repository import Repository
 from ui.charts import IndicatorChartWidget, IndicatorDisplayConfig
+from ui.market_overview import MarketOverviewWidget
 from ui.styles import MAIN_WINDOW_QSS
 
 
@@ -279,12 +281,24 @@ class ThermometerMainWindow(QMainWindow):
         self.control_panel.filters_changed.connect(self._apply_filters)
         self.control_panel.manual_fetch_requested.connect(self._on_manual_fetch_requested)
 
+        # 创建Tab页面
+        self.tab_widget = QTabWidget()
+        
+        # 指标图表Tab
         self.chart_widget = IndicatorChartWidget()
+        self.tab_widget.addTab(self.chart_widget, "指标图表")
+        
+        # 市场概览Tab
+        self.overview_widget = MarketOverviewWidget(
+            database_url=self.database_url,
+            config=self.config
+        )
+        self.tab_widget.addTab(self.overview_widget, "市场概览")
 
         splitter = QSplitter()
         splitter.setOrientation(Qt.Orientation.Horizontal)
         splitter.addWidget(self.control_panel)
-        splitter.addWidget(self.chart_widget)
+        splitter.addWidget(self.tab_widget)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([320, 1080])
