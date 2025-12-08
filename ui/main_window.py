@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
+from pathlib import Path
 
 import pandas as pd
 from PyQt6.QtCore import QDate, QModelIndex, Qt, pyqtSignal, QThread
@@ -261,6 +262,13 @@ class ThermometerMainWindow(QMainWindow):
         super().__init__(parent)
 
         self.config = Config()
+        
+        # 尝试加载用户配置
+        user_config_file = Path("config/user_config.json")
+        if user_config_file.exists():
+            self.config.load_from_json(str(user_config_file))
+            print(f"[INFO] 已加载用户配置: {user_config_file}")
+        
         if not database_url:
             db_path = self.config.get("database.path", "market_thermo.db")
             if db_path.startswith("sqlite:///"):

@@ -45,8 +45,12 @@ class Config:
         return {
             # ============ Regime阈值配置 ============
             "regime": {
-                "attack_threshold": 70,      # Attack regime阈值
-                "defense_threshold": 40,     # Defense regime阈值
+                "attack_threshold": 70,      # Attack regime阈值（全局默认）
+                "defense_threshold": 40,     # Defense regime阈值（全局默认）
+                "attack_threshold_CN": None, # CN市场特定阈值（None表示使用全局默认）
+                "defense_threshold_CN": None,
+                "attack_threshold_US": None, # US市场特定阈值
+                "defense_threshold_US": None,
                 "persistence_days": 0,       # 日视图regime持续确认天数（0表示无持续要求）
                 "persistence_weeks": 1       # 周视图regime持续确认周数
             },

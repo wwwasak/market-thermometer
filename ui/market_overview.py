@@ -34,6 +34,10 @@ import pyqtgraph as pg
 from storage.repository import Repository
 from core.config import Config
 from datetime import datetime, timedelta
+from pathlib import Path
+
+# 配置文件路径
+CONFIG_FILE = Path("config/user_config.json")
 
 
 class ScoreCalculationWorker(QThread):
@@ -232,14 +236,30 @@ class MarketScoreTable(QWidget):
     市场评分表格
     
     显示各个指标的当前评分、权重、方向等信息
+    支持权重编辑
     """
     
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         
-        # 标题
+        # 标题和按钮
+        title_layout = QHBoxLayout()
+        
         title_label = QLabel("指标评分表")
         title_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #1F2933;")
+        
+        self.save_weights_btn = QPushButton("保存权重")
+        self.save_weights_btn.setToolTip("保存修改的指标权重到配置")
+        self.save_weights_btn.clicked.connect(self._on_save_weights)
+        
+        self.reset_weights_btn = QPushButton("重置为当前风格")
+        self.reset_weights_btn.setToolTip("重置权重为当前选择的风格默认值")
+        self.reset_weights_btn.clicked.connect(self._on_reset_weights)
+        
+        title_layout.addWidget(title_label)
+        title_layout.addStretch()
+        title_layout.addWidget(self.reset_weights_btn)
+        title_layout.addWidget(self.save_weights_btn)
         
         # 表格
         self.table = QTableWidget()
@@ -258,14 +278,27 @@ class MarketScoreTable(QWidget):
         
         # 布局
         layout = QVBoxLayout(self)
-        layout.addWidget(title_label)
+        layout.addLayout(title_layout)
         layout.addWidget(self.table)
+        
+        # 保存权重SpinBox的引用
+        self.weight_spinboxes: Dict[str, QSpinBox] = {}
+        
+        # 保存配置、市场和风格的引用
+        self._config = None
+        self._market = None
+        self._style = None
+        self._indicator_codes = []
+        self._original_weights = []
     
     def update_scores(
         self,
         indicator_data: List[Dict],
         weights: List[float],
-        current_date: Optional[date] = None
+        current_date: Optional[date] = None,
+        market: str = None,
+        style: str = None,
+        config: Config = None
     ) -> None:
         """
         更新评分表格
@@ -273,12 +306,23 @@ class MarketScoreTable(QWidget):
         @param {List[Dict]} indicator_data - 指标数据列表
         @param {List[float]} weights - 权重列表
         @param {Optional[date]} current_date - 当前日期
+        @param {str} market - 市场代码
+        @param {str} style - 风格
+        @param {Config} config - 配置对象
         """
+        self._config = config
+        self._market = market
+        self._style = style
+        self._indicator_codes = [ind.get('code') for ind in indicator_data]
+        self._original_weights = weights.copy()
+        self.weight_spinboxes.clear()
+        
         self.table.setRowCount(len(indicator_data))
         
         for row, (ind_data, weight) in enumerate(zip(indicator_data, weights)):
             # 指标代码
-            code_item = QTableWidgetItem(ind_data.get('code', ''))
+            code = ind_data.get('code', '')
+            code_item = QTableWidgetItem(code)
             code_item.setFlags(code_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(row, 0, code_item)
             
@@ -308,11 +352,111 @@ class MarketScoreTable(QWidget):
             score_item.setFlags(score_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(row, 4, score_item)
             
-            # 权重
-            weight_str = f"{weight:.1f}"
-            weight_item = QTableWidgetItem(weight_str)
-            weight_item.setFlags(weight_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.table.setItem(row, 5, weight_item)
+            # 权重 - 使用SpinBox可编辑
+            spinbox = QSpinBox()
+            spinbox.setRange(0, 100)
+            spinbox.setValue(int(weight))
+            spinbox.setSuffix("%")
+            spinbox.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            
+            self.table.setCellWidget(row, 5, spinbox)
+            self.weight_spinboxes[code] = spinbox
+    
+    def _on_save_weights(self) -> None:
+        """保存权重按钮点击事件"""
+        if not self._config or not self._market or not self._style:
+            QMessageBox.warning(self, "错误", "无法保存：缺少配置信息")
+            return
+        
+        # 收集当前的权重
+        new_weights = []
+        total_weight = 0
+        
+        for code in self._indicator_codes:
+            spinbox = self.weight_spinboxes.get(code)
+            if spinbox:
+                weight = spinbox.value()
+                new_weights.append(weight)
+                total_weight += weight
+        
+        # 验证权重总和
+        if total_weight != 100:
+            reply = QMessageBox.question(
+                self,
+                "权重总和不为100",
+                f"当前权重总和为 {total_weight}%，不等于100%。\n\n"
+                f"是否归一化权重到100%？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                # 归一化
+                normalized_weights = [int(w * 100 / total_weight) for w in new_weights]
+                
+                # 处理舍入误差：调整最大权重确保总和为100
+                current_sum = sum(normalized_weights)
+                if current_sum != 100:
+                    max_idx = normalized_weights.index(max(normalized_weights))
+                    normalized_weights[max_idx] += (100 - current_sum)
+                
+                new_weights = normalized_weights
+                
+                # 更新显示
+                for code, weight in zip(self._indicator_codes, new_weights):
+                    spinbox = self.weight_spinboxes.get(code)
+                    if spinbox:
+                        spinbox.blockSignals(True)
+                        spinbox.setValue(weight)
+                        spinbox.blockSignals(False)
+                
+                total_weight = 100
+            else:
+                return
+        
+        # 保存到配置
+        try:
+            config_key = f"style_weights.{self._market}.{self._style}"
+            self._config.set(config_key, new_weights)
+            
+            # 确保配置目录存在
+            CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            self._config.save_to_json(str(CONFIG_FILE))
+            
+            QMessageBox.information(
+                self,
+                "保存成功",
+                f"{self._market}市场 {self._style}风格的权重已更新。\n\n"
+                f"权重总和: {total_weight}%\n\n"
+                f"提示：权重修改后，建议点击'计算评分'按钮重新计算评分数据。"
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "保存失败",
+                f"保存权重失败：\n\n{str(e)}"
+            )
+    
+    def _on_reset_weights(self) -> None:
+        """重置权重为当前风格的默认值"""
+        if not self._original_weights:
+            return
+        
+        reply = QMessageBox.question(
+            self,
+            "确认重置",
+            f"确定要重置为 {self._style} 风格的默认权重吗？\n\n"
+            f"当前修改将被丢弃。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            # 恢复原始权重
+            for code, weight in zip(self._indicator_codes, self._original_weights):
+                spinbox = self.weight_spinboxes.get(code)
+                if spinbox:
+                    spinbox.blockSignals(True)
+                    spinbox.setValue(int(weight))
+                    spinbox.blockSignals(False)
     
     # 移除_get_lamp_from_score方法，主要指标不显示灯色
 
@@ -355,6 +499,11 @@ class CompositeScoreChart(QWidget):
         self.defense_spinbox.setToolTip("Defense阈值（红色线）")
         self.defense_spinbox.valueChanged.connect(self._on_defense_threshold_changed)
         
+        # 阈值重置按钮
+        self.reset_thresholds_btn = QPushButton("重置阈值")
+        self.reset_thresholds_btn.setToolTip("重置为默认阈值(70/40)")
+        self.reset_thresholds_btn.clicked.connect(self._on_reset_thresholds)
+        
         self.export_btn = QPushButton("导出图表")
         self.export_btn.clicked.connect(self._export_chart)
         
@@ -364,6 +513,7 @@ class CompositeScoreChart(QWidget):
         header_layout.addWidget(QLabel("阈值设置:"))
         header_layout.addWidget(self.attack_spinbox)
         header_layout.addWidget(self.defense_spinbox)
+        header_layout.addWidget(self.reset_thresholds_btn)
         header_layout.addWidget(self.export_btn)
         
         # 图表 - 简化版
@@ -470,15 +620,24 @@ class CompositeScoreChart(QWidget):
         self._config = config
         self._current_market = market
         
-        # 从配置加载阈值
+        # 从配置加载阈值（使用下划线格式）
         if config:
-            attack_threshold = config.get(f'regime.attack_threshold.{market}', 
-                                          config.get('regime.attack_threshold', 70))
-            defense_threshold = config.get(f'regime.defense_threshold.{market}',
-                                           config.get('regime.defense_threshold', 40))
+            # 先尝试市场特定配置
+            attack_threshold = config.get(f'regime.attack_threshold_{market}')
+            # 如果为None，使用全局默认
+            if attack_threshold is None:
+                attack_threshold = config.get('regime.attack_threshold', 70)
+            
+            defense_threshold = config.get(f'regime.defense_threshold_{market}')
+            if defense_threshold is None:
+                defense_threshold = config.get('regime.defense_threshold', 40)
         else:
             attack_threshold = 70
             defense_threshold = 40
+        
+        # 确保值是整数且在合理范围内
+        attack_threshold = int(attack_threshold) if attack_threshold is not None else 70
+        defense_threshold = int(defense_threshold) if defense_threshold is not None else 40
         
         # 更新SpinBox值（不触发信号）
         self.attack_spinbox.blockSignals(True)
@@ -746,13 +905,29 @@ class CompositeScoreChart(QWidget):
         self.attack_line.setPos(value)
         self.attack_line.label.setText(f'Attack ({value})')
         
-        # 保存到配置
+        # 验证合理性
+        defense_value = self.defense_spinbox.value()
+        if value <= defense_value:
+            # 不保存，提示用户
+            QMessageBox.warning(
+                self,
+                "阈值设置错误",
+                f"Attack阈值({value})必须大于Defense阈值({defense_value})。\n\n"
+                f"请调整后配置才会生效。"
+            )
+            return
+        
+        # 保存到配置（自动保存）
         if self._config and self._current_market:
-            config_key = f'regime.attack_threshold.{self._current_market}'
-            self._config.config[config_key] = value
-            # 自动保存
+            # 使用下划线格式: attack_threshold_CN 而不是 attack_threshold.CN
+            config_key = f'regime.attack_threshold_{self._current_market}'
+            self._config.set(config_key, value)
             try:
-                self._config.save()
+                # 确保配置目录存在
+                CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+                self._config.save_to_json(str(CONFIG_FILE))
+                # 静默保存，不弹窗（避免打扰）
+                print(f"[INFO] {self._current_market}市场Attack阈值已保存: {value}")
             except Exception as e:
                 print(f"[WARN] 保存Attack阈值失败: {e}")
     
@@ -761,15 +936,83 @@ class CompositeScoreChart(QWidget):
         self.defense_line.setPos(value)
         self.defense_line.label.setText(f'Defense ({value})')
         
-        # 保存到配置
+        # 验证合理性
+        attack_value = self.attack_spinbox.value()
+        if value >= attack_value:
+            # 不保存，提示用户
+            QMessageBox.warning(
+                self,
+                "阈值设置错误",
+                f"Defense阈值({value})必须小于Attack阈值({attack_value})。\n\n"
+                f"请调整后配置才会生效。"
+            )
+            return
+        
+        # 保存到配置（自动保存）
         if self._config and self._current_market:
-            config_key = f'regime.defense_threshold.{self._current_market}'
-            self._config.config[config_key] = value
-            # 自动保存
+            # 使用下划线格式: defense_threshold_CN 而不是 defense_threshold.CN
+            config_key = f'regime.defense_threshold_{self._current_market}'
+            self._config.set(config_key, value)
             try:
-                self._config.save()
+                # 确保配置目录存在
+                CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+                self._config.save_to_json(str(CONFIG_FILE))
+                # 静默保存，不弹窗
+                print(f"[INFO] {self._current_market}市场Defense阈值已保存: {value}")
             except Exception as e:
                 print(f"[WARN] 保存Defense阈值失败: {e}")
+    
+    def _on_reset_thresholds(self) -> None:
+        """重置阈值为默认值"""
+        reply = QMessageBox.question(
+            self,
+            "确认重置阈值",
+            f"确定要重置{self._current_market or '当前市场'}的阈值为默认值吗？\n\n"
+            f"默认Attack: 70分\n"
+            f"默认Defense: 40分\n\n"
+            f"当前设置将被覆盖。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            # 重置为默认值
+            self.attack_spinbox.blockSignals(True)
+            self.defense_spinbox.blockSignals(True)
+            self.attack_spinbox.setValue(70)
+            self.defense_spinbox.setValue(40)
+            self.attack_spinbox.blockSignals(False)
+            self.defense_spinbox.blockSignals(False)
+            
+            # 更新阈值线
+            self.attack_line.setPos(70)
+            self.defense_line.setPos(40)
+            self.attack_line.label.setText('Attack (70)')
+            self.defense_line.label.setText('Defense (40)')
+            
+            # 从配置中删除市场特定设置
+            if self._config and self._current_market:
+                # 使用下划线格式
+                attack_key = f'regime.attack_threshold_{self._current_market}'
+                defense_key = f'regime.defense_threshold_{self._current_market}'
+                
+                # 设置为None（get会忽略并返回默认值）
+                try:
+                    self._config.set(attack_key, None)
+                    self._config.set(defense_key, None)
+                except:
+                    pass
+                
+                try:
+                    # 确保配置目录存在
+                    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    self._config.save_to_json(str(CONFIG_FILE))
+                    QMessageBox.information(
+                        self,
+                        "重置成功",
+                        f"{self._current_market}市场的阈值已重置为默认值(70/40)。"
+                    )
+                except Exception as e:
+                    QMessageBox.critical(self, "保存失败", f"保存配置失败：\n\n{str(e)}")
 
 
 class ConfirmLayerPanel(QWidget):
@@ -958,8 +1201,11 @@ class ConfirmLayerPanel(QWidget):
         # 保存到配置
         try:
             config_key = f"soft_confirm_weights.{self._current_market}"
-            self._config.config[config_key] = new_weights
-            self._config.save()
+            self._config.set(config_key, new_weights)
+            
+            # 确保配置目录存在
+            CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            self._config.save_to_json(str(CONFIG_FILE))
             
             QMessageBox.information(
                 self,
@@ -1400,7 +1646,14 @@ class MarketOverviewWidget(QWidget):
             
             # 更新评分表格
             if indicator_data:
-                self.score_table.update_scores(indicator_data, weights, latest_date)
+                self.score_table.update_scores(
+                    indicator_data, 
+                    weights, 
+                    latest_date,
+                    market,
+                    style,
+                    self.config
+                )
         except Exception as e:
             print(f"[ERROR] 加载指标数据失败: {e}")
         
