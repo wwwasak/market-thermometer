@@ -461,8 +461,12 @@ def fetch_3years_data_auto(market: str, db_url: str) -> Dict[str, Any]:
     # 计算评分
     print(f"\n[INFO] 开始计算评分...")
     try:
-        scores = pipeline.calculate_scores(transformed_data, view_type='daily')
+        # calculate_scores 返回元组: (scores DataFrame, composite_score Series)
+        scores, composite_score = pipeline.calculate_scores(transformed_data, view_type='daily')
         print(f"[OK] 评分计算完成")
+        if composite_score is not None:
+            valid_comp = composite_score.notna().sum() if hasattr(composite_score, 'notna') else 0
+            print(f"[INFO] 综合评分: {valid_comp}/{len(composite_score) if hasattr(composite_score, '__len__') else 0} 个有效值")
     except Exception as e:
         print(f"[ERROR] 评分计算失败: {e}")
         import traceback
@@ -490,7 +494,8 @@ def fetch_3years_data_auto(market: str, db_url: str) -> Dict[str, Any]:
     print(f"\n[INFO] 开始保存到数据库...")
     try:
         saved_count = pipeline.save_to_database(
-            raw_data, transformed_data, scores, confirm_results, view_type='daily'
+            raw_data, transformed_data, scores, confirm_results, 
+            composite_score, view_type='daily'
         )
         print(f"[OK] 保存完成，共保存 {saved_count} 条记录")
     except Exception as e:
