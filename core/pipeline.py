@@ -563,17 +563,50 @@ class MarketPipeline:
             direction = indicator.get('direction', 'up_good')
             z_type = indicator.get('z_type', self.market_config.get('z_type', 'Z'))
             z_window = indicator.get('z_window', self.market_config.get('z_window', 60))
+            transform_type = indicator.get('transform', 'raw')
             
-            # 计算Z分数
-            z = standardize_with_direction(
-                series,
-                direction=direction,
-                z_type=z_type,
-                window=z_window
-            )
+            # **修复：对月度指标（如PMI），先在月度数据点计算评分，再前向填充**
+            # 这样可以避免Z-score窗口滑动导致同一个月内评分每天变化的问题
+            is_monthly_indicator = 'ffill' in transform_type or code in ['PMI_NEWORDER_YOY_STD']
             
-            # 计算评分
-            score = score_from_z(z, center=50, scale=10)
+            if is_monthly_indicator:
+                # 对于月度指标，只在实际数据变化点计算Z-score
+                # 识别数据变化点（月度发布日期）
+                value_changes = series != series.shift(1)
+                monthly_points = series[value_changes].dropna()
+                
+                if len(monthly_points) > 0:
+                    # 对月度数据，使用更小的window（月数）
+                    monthly_z_window = min(12, len(monthly_points) - 1) if len(monthly_points) > 1 else 1
+                    
+                    # 只对月度数据点计算Z-score
+                    z_monthly = standardize_with_direction(
+                        monthly_points,
+                        direction=direction,
+                        z_type=z_type,
+                        window=monthly_z_window
+                    )
+                    
+                    # 计算月度评分
+                    score_monthly = score_from_z(z_monthly, center=50, scale=10)
+                    
+                    # 前向填充到所有日期
+                    z = z_monthly.reindex(series.index, method='ffill')
+                    score = score_monthly.reindex(series.index, method='ffill')
+                else:
+                    z = pd.Series(index=series.index, dtype=float)
+                    score = pd.Series(index=series.index, dtype=float)
+            else:
+                # 对于日度指标，正常计算
+                z = standardize_with_direction(
+                    series,
+                    direction=direction,
+                    z_type=z_type,
+                    window=z_window
+                )
+                
+                # 计算评分
+                score = score_from_z(z, center=50, scale=10)
             
             z_dict[code] = z
             score_dict[code] = score
