@@ -72,7 +72,8 @@ class ManualFetchWorker(QThread):
             result: Dict[str, Dict] = {}
             for market in self.markets:
                 pipeline = MarketPipeline(market=market, database_url=self.database_url)
-                result[market] = pipeline.run_daily_pipeline(
+                # 只获取原始数据，不计算评分
+                result[market] = pipeline.fetch_and_save_raw_data(
                     start_date=self.start_date,
                     end_date=self.end_date,
                     incremental=True,
@@ -139,7 +140,7 @@ class IndicatorControlPanel(QWidget):
         self.reset_date_btn.clicked.connect(self._reset_date_range)
 
         self.manual_fetch_btn = QPushButton("手动获取最新数据")
-        self.manual_fetch_btn.setToolTip("触发增量流水线，自动获取最近7个交易日数据")
+        self.manual_fetch_btn.setToolTip("获取最近7个交易日的原始数据（不计算评分）\n获取完成后，请点击'计算评分'按钮")
         self.manual_fetch_btn.clicked.connect(self._emit_manual_fetch)
 
         # 指标列表
@@ -452,7 +453,7 @@ class ThermometerMainWindow(QMainWindow):
         self.control_panel.set_manual_fetch_enabled(True)
         self._refresh_current_indicator()
 
-        summary_lines = []
+        summary_lines = ["原始数据已保存到数据库：", ""]
         for market, payload in result.items():
             if payload.get("success"):
                 records = payload.get("records_saved", 0)
@@ -465,8 +466,12 @@ class ThermometerMainWindow(QMainWindow):
                     summary_lines.append(f"{market}: ✓ {records} 条")
             else:
                 summary_lines.append(f"{market}: ✗ {payload.get('error', 'unknown error')}")
+        
+        summary_lines.append("")
+        summary_lines.append("⚠ 注意：仅保存了原始数据，未计算评分")
+        summary_lines.append("请切换到相应市场后点击'计算评分'按钮")
 
-        QMessageBox.information(self, "手动获取完成", "\n".join(summary_lines))
+        QMessageBox.information(self, "数据获取完成", "\n".join(summary_lines))
 
     def _on_manual_fetch_failed(self, message: str) -> None:
         self.statusBar().showMessage("手动获取失败", 5000)

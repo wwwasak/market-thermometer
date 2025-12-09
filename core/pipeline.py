@@ -805,6 +805,140 @@ class MarketPipeline:
             print(f"[ERROR] 确认层失败: {e}")
             return {}
     
+    def save_raw_data_only(
+        self,
+        raw_data: Dict[str, pd.Series],
+        transformed_data: Dict[str, pd.Series],
+        view_type: str = 'daily'
+    ) -> int:
+        """
+        只保存原始数据和转换数据到数据库（不保存评分）
+        
+        @param {Dict[str, pd.Series]} raw_data - 原始数据
+        @param {Dict[str, pd.Series]} transformed_data - 转换后数据
+        @param {str} view_type - 视图类型
+        @returns {int} 保存的记录数
+        """
+        print(f"\n[INFO] 保存原始数据到数据库...")
+        
+        total_saved = 0
+        
+        # 1. 保存序列元数据（如果不存在）
+        for indicator in self.indicator_lookup.values():
+            code = indicator['code']
+            
+            existing = self.repository.get_series_meta_by_code(code)
+            if not existing:
+                self.repository.add_series_meta(
+                    code=code,
+                    name=indicator.get('name', ''),
+                    market=self.market,
+                    role=indicator.get('role', ''),
+                    direction=indicator.get('direction', 'up_good'),
+                    transform=indicator.get('transform', 'raw'),
+                    source=indicator.get('source', ''),
+                    ticker=indicator.get('ticker', '')
+                )
+        
+        # 准备code到series_id的映射
+        code_to_series_id: Dict[str, int] = {}
+        for indicator in self.indicator_lookup.values():
+            code = indicator['code']
+            meta = self.repository.get_series_meta_by_code(code)
+            if meta and 'id' in meta:
+                code_to_series_id[code] = meta['id']
+        
+        # 2. 保存时间序列数据（只保存value_raw和value_tr，不保存评分）
+        all_series_codes = set(raw_data.keys()) | set(transformed_data.keys())
+        
+        print(f"[INFO] 准备保存 {len(all_series_codes)} 个序列的原始数据")
+        
+        for code in all_series_codes:
+            series_id = code_to_series_id.get(code)
+            if series_id is None:
+                continue
+            
+            raw_obj = raw_data.get(code)
+            trans_series = transformed_data.get(code)
+            extra_value_tr_series: Optional[pd.Series] = None
+            
+            if trans_series is None or len(trans_series) == 0:
+                continue
+            
+            trans_series = self._ensure_naive_series(trans_series)
+            target_index = trans_series.index
+            
+            if isinstance(raw_obj, pd.DataFrame):
+                if 'value_raw' not in raw_obj.columns:
+                    continue
+                raw_series = self._ensure_naive_series(raw_obj['value_raw'])
+                raw_series = self._align_raw_series(raw_series, target_index)
+                if 'value_tr' in raw_obj.columns:
+                    extra_value_tr_series = self._ensure_naive_series(raw_obj['value_tr']).reindex(target_index)
+            elif isinstance(raw_obj, pd.Series):
+                raw_series = self._ensure_naive_series(raw_obj)
+                raw_series = self._align_raw_series(raw_series, target_index)
+            else:
+                raw_series = pd.Series(index=target_index, dtype=float)
+            
+            saved_count = 0
+            
+            for i, date in enumerate(trans_series.index):
+                try:
+                    trans_value = trans_series.iloc[i]
+                    
+                    # 准备record_date
+                    if isinstance(date, pd.Timestamp):
+                        record_date = date.date()
+                    elif isinstance(date, datetime):
+                        record_date = date.date()
+                    else:
+                        record_date = date
+                    
+                    raw_value = raw_series.loc[date] if date in raw_series.index else None
+                    if raw_value is not None and (not np.isscalar(raw_value) or pd.isna(raw_value)):
+                        raw_value = None
+                    
+                    if extra_value_tr_series is not None and date in extra_value_tr_series.index:
+                        value_tr = extra_value_tr_series.loc[date]
+                    else:
+                        value_tr = trans_value
+                    
+                    if value_tr is not None and (not np.isscalar(value_tr) or pd.isna(value_tr)):
+                        value_tr = None
+                    
+                    # 只保存value_raw和value_tr，不保存z和score
+                    self.repository.upsert_series_data(
+                        series_id=series_id,
+                        date=record_date,
+                        view=view_type,
+                        value_raw=float(raw_value) if raw_value is not None else None,
+                        value_tr=float(value_tr) if value_tr is not None else None,
+                        z=None,  # 不保存评分
+                        score=None  # 不保存评分
+                    )
+                    
+                    total_saved += 1
+                    saved_count += 1
+                
+                except Exception as e:
+                    print(f"[WARN] 保存 {code} 数据失败 ({date}): {e}")
+                    continue
+            
+            if saved_count > 0:
+                print(f"[OK] {code}: 保存 {saved_count} 条记录")
+        
+        print(f"[OK] 共保存 {total_saved} 条原始数据记录")
+        
+        # 记录日志
+        self.repository.add_fetch_log(
+            action='save_raw_data',
+            status='success',
+            message=f"Saved {total_saved} raw data records for {self.market} {view_type}"
+        )
+        
+        return total_saved
+    
     def save_to_database(
         self,
         raw_data: Dict[str, pd.Series],
@@ -1114,6 +1248,93 @@ class MarketPipeline:
         
         return total_saved
     
+    def fetch_and_save_raw_data(
+        self,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        incremental: bool = False
+    ) -> Dict[str, Any]:
+        """
+        获取并保存原始数据（不计算评分）
+        
+        @param {Optional[datetime]} start_date - 开始日期
+        @param {Optional[datetime]} end_date - 结束日期
+        @param {bool} incremental - 是否增量更新
+        @returns {Dict[str, Any]} 运行结果
+        """
+        print("\n" + "="*70)
+        print(f"  获取 {self.market} 市场原始数据")
+        print(f"  注意：只获取数据，不计算评分")
+        print("="*70)
+        
+        try:
+            # 1. 获取数据
+            raw_data = self.fetch_all_data(start_date, end_date, incremental)
+            
+            if not raw_data:
+                raise PipelineError("No data fetched")
+            
+            # 2. 转换数据
+            transformed_data = self.transform_data(raw_data)
+            
+            # 2.5 计算派生指标
+            raw_data, transformed_data = self.calculate_derived_indicators(
+                raw_data,
+                transformed_data,
+                start_date,
+                end_date
+            )
+            
+            # 3. 只保存原始数据，不计算评分
+            saved_count = self.save_raw_data_only(
+                raw_data, transformed_data, view_type='daily'
+            )
+            
+            self.last_update = datetime.now()
+            
+            # 获取日期范围
+            all_dates = []
+            for series in transformed_data.values():
+                if isinstance(series, pd.Series) and len(series) > 0:
+                    all_dates.extend(series.index.tolist())
+            
+            if all_dates:
+                date_min = min(all_dates)
+                date_max = max(all_dates)
+            else:
+                date_min = start_date
+                date_max = end_date
+            
+            result = {
+                'success': True,
+                'market': self.market,
+                'view_type': 'daily',
+                'indicators_fetched': len(raw_data),
+                'records_saved': saved_count,
+                'date_range': (date_min, date_max),
+                'timestamp': self.last_update
+            }
+            
+            print("\n" + "="*70)
+            print(f"  数据获取完成")
+            print("="*70)
+            print(f"[OK] 获取指标: {result['indicators_fetched']}")
+            print(f"[OK] 保存记录: {result['records_saved']}")
+            print(f"[OK] 时间范围: {result['date_range'][0]} 至 {result['date_range'][1]}")
+            print(f"\n[提示] 请在GUI中点击'计算评分'按钮进行评分计算")
+            
+            return result
+        
+        except Exception as e:
+            print(f"\n[ERROR] 数据获取失败: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
     def run_daily_pipeline(
         self,
         start_date: Optional[datetime] = None,
@@ -1121,7 +1342,9 @@ class MarketPipeline:
         incremental: bool = False
     ) -> Dict[str, Any]:
         """
-        运行日度流水线
+        运行日度流水线（包含评分计算）
+        
+        注意：建议使用 fetch_and_save_raw_data() + GUI计算评分 的方式
         
         @param {Optional[datetime]} start_date - 开始日期
         @param {Optional[datetime]} end_date - 结束日期  
@@ -1129,7 +1352,7 @@ class MarketPipeline:
         @returns {Dict[str, Any]} 运行结果
         """
         print("\n" + "="*70)
-        print(f"  运行 {self.market} 市场日度流水线")
+        print(f"  运行 {self.market} 市场日度流水线（包含评分）")
         print("="*70)
         
         try:

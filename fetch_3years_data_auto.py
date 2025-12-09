@@ -1,12 +1,16 @@
 """
-自动获取近三年数据并验证（完全自动化，无需CSV导入）
+自动获取近三年原始数据（完全自动化，无需CSV导入）
 
 功能：
-1. 自动获取CN和US市场近三年（1095天）的所有指标数据
+1. 自动获取CN和US市场近三年（1095天）的所有指标原始数据
 2. 使用多种数据源：FRED、yfinance、akshare、Stooq（东方财富通过akshare）
-3. 填充数据库
-4. 验证是否符合demand.txt中的需求
-5. 检查计算逻辑是否正确
+3. 应用数据转换（yoy_std、pct_change等）
+4. 保存 value_raw 和 value_tr 到数据库
+
+注意：
+- 本脚本只负责获取和保存原始数据，不计算评分
+- 评分计算请使用 GUI 中的"计算评分"按钮
+- 这样设计的好处：可以先获取数据，然后灵活调整权重/参数后重新计算评分
 """
 
 import os
@@ -458,46 +462,14 @@ def fetch_3years_data_auto(market: str, db_url: str) -> Dict[str, Any]:
             'error': f'Transform failed: {str(e)}'
         }
     
-    # 计算评分
-    print(f"\n[INFO] 开始计算评分...")
+    # 保存原始数据到数据库（不计算评分）
+    print(f"\n[INFO] 开始保存原始数据到数据库...")
+    print(f"[INFO] 评分计算请使用 GUI 中的'计算评分'按钮")
     try:
-        # calculate_scores 返回元组: (scores DataFrame, composite_score Series)
-        scores, composite_score = pipeline.calculate_scores(transformed_data, view_type='daily')
-        print(f"[OK] 评分计算完成")
-        if composite_score is not None:
-            valid_comp = composite_score.notna().sum() if hasattr(composite_score, 'notna') else 0
-            print(f"[INFO] 综合评分: {valid_comp}/{len(composite_score) if hasattr(composite_score, '__len__') else 0} 个有效值")
-    except Exception as e:
-        print(f"[ERROR] 评分计算失败: {e}")
-        import traceback
-        traceback.print_exc()
-        return {
-            'success': False,
-            'error': f'Scoring failed: {str(e)}'
-        }
-    
-    # 应用确认层
-    print(f"\n[INFO] 开始应用确认层...")
-    try:
-        confirm_results = pipeline.apply_confirm_layer(scores, view_type='daily')
-        print(f"[OK] 确认层应用完成")
-    except Exception as e:
-        print(f"[ERROR] 确认层应用失败: {e}")
-        import traceback
-        traceback.print_exc()
-        return {
-            'success': False,
-            'error': f'Confirm layer failed: {str(e)}'
-        }
-    
-    # 保存到数据库
-    print(f"\n[INFO] 开始保存到数据库...")
-    try:
-        saved_count = pipeline.save_to_database(
-            raw_data, transformed_data, scores, confirm_results, 
-            composite_score, view_type='daily'
+        saved_count = pipeline.save_raw_data_only(
+            raw_data, transformed_data, view_type='daily'
         )
-        print(f"[OK] 保存完成，共保存 {saved_count} 条记录")
+        print(f"[OK] 保存完成，共保存 {saved_count} 条原始数据记录")
     except Exception as e:
         print(f"[ERROR] 保存失败: {e}")
         import traceback
@@ -518,10 +490,11 @@ def fetch_3years_data_auto(market: str, db_url: str) -> Dict[str, Any]:
 
 def main():
     """
-    主函数
+    主函数 - 只负责获取原始数据
     """
     print("=" * 80)
-    print("双市场温度计 - 自动获取近三年数据（完全自动化）")
+    print("双市场温度计 - 自动获取近三年原始数据")
+    print("注意：本脚本只获取原始数据，评分计算请在GUI中进行")
     print("=" * 80)
     
     # 初始化配置
@@ -589,8 +562,16 @@ def main():
         print(f"\n⚠ 以下指标需要手动导入或修复:")
         for item in all_manual:
             print(f"  - {item['code']}: {item['reason']}")
-        else:
-            print(f"\n✓ 所有指标都已成功自动获取！")
+    else:
+        print(f"\n✓ 所有指标都已成功自动获取！")
+    
+    print(f"\n{'='*80}")
+    print("下一步操作：")
+    print(f"{'='*80}")
+    print("1. 运行 GUI 应用: python app.py")
+    print("2. 在 GUI 中点击'计算评分'按钮进行评分计算")
+    print("3. 如需调整权重，可修改后重新计算评分")
+    print(f"{'='*80}")
 
 
 if __name__ == '__main__':
