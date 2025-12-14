@@ -3,7 +3,7 @@
     "attack_threshold": 70,
     "defense_threshold": 40,
     "attack_threshold_CN": 54,
-    "defense_threshold_CN": null,
+    "defense_threshold_CN": 40,
     "attack_threshold_US": 50,
     "defense_threshold_US": null,
     "persistence_days": 0,
@@ -49,12 +49,12 @@
   "style_weights": {
     "CN": {
       "Attack": [
+        50,
+        4,
         24,
-        16,
-        12,
-        20,
-        16,
-        12
+        10,
+        2,
+        10
       ],
       "Balanced": [
         20,
@@ -95,14 +95,14 @@
         12,
         24,
         18,
-        28,
-        0
+        27,
+        1
       ]
     }
   },
   "active_style": {
-    "CN": "Balanced",
-    "US": "Attack"
+    "CN": "Attack",
+    "US": "Defense"
   },
   "hard_veto_rules": {
     "CN": {
@@ -244,7 +244,7 @@
           "code": "RRP_D20",
           "name": "RRP Δ20d",
           "direction": "down_good",
-          "transform": "delta20",
+          "transform": "delta20_ffill",
           "z_type": "Z",
           "z_window": 60,
           "source": "fred",
@@ -254,7 +254,7 @@
           "code": "TGA_D20",
           "name": "TGA Δ20d",
           "direction": "down_good",
-          "transform": "delta20",
+          "transform": "delta20_ffill",
           "z_type": "Z",
           "z_window": 60,
           "source": "fred",

@@ -33,6 +33,26 @@ def transform_delta20(series: pd.Series, window: int = 20) -> pd.Series:
     return series - series.shift(window)
 
 
+def transform_delta20_ffill(series: pd.Series, window: int = 20) -> pd.Series:
+    """
+    计算N日变动量（差分），先前向填充
+    
+    用于非每日更新的数据（如TGA每周更新一次）
+    
+    @param {pd.Series} series - 输入时间序列
+    @param {int} window - 回看窗口（默认20个交易日）
+    @returns {pd.Series} 变动量序列
+    
+    @example
+    >>> prices = pd.Series([100, np.nan, np.nan, 105], index=pd.date_range('2024-01-01', periods=4))
+    >>> deltas = transform_delta20_ffill(prices, window=2)
+    """
+    # 先前向填充
+    filled_series = series.ffill()
+    # 再计算差分
+    return filled_series - filled_series.shift(window)
+
+
 def transform_pct20(series: pd.Series, window: int = 20) -> pd.Series:
     """
     计算N日百分比变动
@@ -300,6 +320,7 @@ def apply_transform(
     """
     transform_map = {
         'delta20': transform_delta20,
+        'delta20_ffill': transform_delta20_ffill,
         'pct20': transform_pct20,
         'log_winsor': transform_log_winsor,
         'yoy_std_ffill': transform_yoy_std_ffill,

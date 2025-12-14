@@ -250,7 +250,8 @@ class MarketPipeline:
         self,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
-        incremental: bool = False
+        incremental: bool = False,
+        skip_validation: bool = False
     ) -> Dict[str, pd.Series]:
         """
         获取所有指标的原始数据
@@ -258,6 +259,7 @@ class MarketPipeline:
         @param {Optional[datetime]} start_date - 开始日期
         @param {Optional[datetime]} end_date - 结束日期
         @param {bool} incremental - 是否增量更新
+        @param {bool} skip_validation - 是否跳过数据质量验证（仅获取原始数据时使用）
         @returns {Dict[str, pd.Series]} 数据字典 {code: series}
         """
         print(f"\n[INFO] 开始获取 {self.market} 市场数据...")
@@ -305,14 +307,21 @@ class MarketPipeline:
                 data = self.data_source.fetch_by_config(indicator, start_date, end_date)
                 
                 if len(data) > 0:
-                    # 验证数据质量（降低最小长度要求以支持短期数据）
-                    is_valid, message = validate_series(data, min_length=20)
-                    if is_valid:
+                    # 验证数据质量（可选）
+                    if skip_validation:
+                        # 跳过验证，直接保存（用于增量更新原始数据）
                         results[code] = data
                         success_count += 1
-                        print(f"  [OK] {len(data)} 条记录")
+                        print(f"  [OK] {len(data)} 条记录（跳过质量检查）")
                     else:
-                        print(f"  [WARN] 数据质量不合格: {message}")
+                        # 验证数据质量（降低最小长度要求以支持短期数据）
+                        is_valid, message = validate_series(data, min_length=20)
+                        if is_valid:
+                            results[code] = data
+                            success_count += 1
+                            print(f"  [OK] {len(data)} 条记录")
+                        else:
+                            print(f"  [WARN] 数据质量不合格: {message}")
                 else:
                     print(f"  [FAIL] 未获取到数据")
             
@@ -351,20 +360,32 @@ class MarketPipeline:
             transform = indicator.get('transform', 'raw')
             extra_value_tr: Optional[pd.Series] = None
 
+            # 处理不同类型的数据对象
             if isinstance(data_obj, pd.DataFrame):
+                # DataFrame类型（已包含value_raw和value_tr）
                 if 'value_raw' not in data_obj.columns:
                     print(f"[WARN] {code} 数据缺少 value_raw 列，跳过转换")
                     continue
                 series = self._ensure_naive_series(data_obj['value_raw'])
                 if 'value_tr' in data_obj.columns:
                     extra_value_tr = self._ensure_naive_series(data_obj['value_tr'])
+            elif isinstance(data_obj, tuple):
+                # tuple类型（多ticker指标，如relret20）
+                # 需要将tuple中的每个series转换为naive
+                series = tuple(self._ensure_naive_series(s) for s in data_obj)
+                print(f"[INFO] {code} 是多ticker指标，包含 {len(series)} 个series")
             else:
+                # 单个Series
                 series = self._ensure_naive_series(data_obj)
             
             try:
                 if extra_value_tr is not None:
                     transformed_series = extra_value_tr
                 elif transform == 'raw':
+                    # 对于raw转换，tuple不应该直接使用
+                    if isinstance(series, tuple):
+                        print(f"[WARN] {code} 是多ticker指标但转换类型为'raw'，跳过")
+                        continue
                     transformed_series = series
                 else:
                     transformed_series = apply_transform(series, transform)
@@ -374,6 +395,8 @@ class MarketPipeline:
             
             except Exception as e:
                 print(f"[ERROR] {code} 转换失败: {e}")
+                import traceback
+                traceback.print_exc()
         
         print(f"[OK] 完成 {len(transformed)} 个指标的转换")
         
@@ -875,6 +898,11 @@ class MarketPipeline:
                 raw_series = self._align_raw_series(raw_series, target_index)
                 if 'value_tr' in raw_obj.columns:
                     extra_value_tr_series = self._ensure_naive_series(raw_obj['value_tr']).reindex(target_index)
+            elif isinstance(raw_obj, tuple):
+                # tuple类型（多ticker指标），使用转换后的序列作为原始值
+                # 因为tuple本身不能直接保存为单一的原始值
+                raw_series = trans_series.copy()
+                print(f"[INFO] {code} 是多ticker指标，使用转换后的值作为原始值")
             elif isinstance(raw_obj, pd.Series):
                 raw_series = self._ensure_naive_series(raw_obj)
                 raw_series = self._align_raw_series(raw_series, target_index)
@@ -1028,6 +1056,9 @@ class MarketPipeline:
                 raw_series = self._align_raw_series(raw_series, target_index)
                 if 'value_tr' in raw_obj.columns:
                     extra_value_tr_series = self._ensure_naive_series(raw_obj['value_tr']).reindex(target_index)
+            elif isinstance(raw_obj, tuple):
+                # tuple类型（多ticker指标），使用转换后的序列作为原始值
+                raw_series = trans_series.copy()
             elif isinstance(raw_obj, pd.Series):
                 raw_series = self._ensure_naive_series(raw_obj)
                 raw_series = self._align_raw_series(raw_series, target_index)
@@ -1268,8 +1299,8 @@ class MarketPipeline:
         print("="*70)
         
         try:
-            # 1. 获取数据
-            raw_data = self.fetch_all_data(start_date, end_date, incremental)
+            # 1. 获取数据（跳过质量验证，因为只是保存原始数据）
+            raw_data = self.fetch_all_data(start_date, end_date, incremental, skip_validation=True)
             
             if not raw_data:
                 raise PipelineError("No data fetched")
