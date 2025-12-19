@@ -408,7 +408,7 @@ def fetch_3years_data_auto(market: str, db_url: str) -> Dict[str, Any]:
     
     # 计算日期范围（近三年，约1095天）
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=1095)
+    start_date = end_date - timedelta(days=1095)#1095是三年，一年改365
     
     print(f"\n[INFO] 日期范围: {start_date.strftime('%Y-%m-%d')} 至 {end_date.strftime('%Y-%m-%d')}")
     print(f"[INFO] 预计交易日数: ~{1095 * 5 // 7} 天")

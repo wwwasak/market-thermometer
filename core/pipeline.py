@@ -588,9 +588,12 @@ class MarketPipeline:
             z_window = indicator.get('z_window', self.market_config.get('z_window', 60))
             transform_type = indicator.get('transform', 'raw')
             
-            # **修复：对月度指标（如PMI），先在月度数据点计算评分，再前向填充**
-            # 这样可以避免Z-score窗口滑动导致同一个月内评分每天变化的问题
-            is_monthly_indicator = 'ffill' in transform_type or code in ['PMI_NEWORDER_YOY_STD']
+            # **修复：对低频指标（如PMI、TGA、RRP），先在数据变化点计算评分，再前向填充**
+            # 这样可以避免Z-score窗口滑动导致同一时期内评分每天变化的问题
+            is_monthly_indicator = (
+                'ffill' in transform_type or 
+                code in ['PMI_NEWORDER_YOY_STD', 'TGA_D20', 'RRP_D20']
+            )
             
             if is_monthly_indicator:
                 # 对于月度指标，只在实际数据变化点计算Z-score
@@ -828,6 +831,66 @@ class MarketPipeline:
             print(f"[ERROR] 确认层失败: {e}")
             return {}
     
+    def _get_reference_trading_days(
+        self,
+        current_data: Optional[Dict[str, pd.Series]] = None
+    ) -> pd.DatetimeIndex:
+        """
+        获取参考交易日列表（用于填充低频指标）
+        
+        @param {Optional[Dict[str, pd.Series]]} current_data - 当前批次的数据
+        @returns {pd.DatetimeIndex} 参考交易日列表
+        """
+        # 策略1: 从当前批次的数据中找到最完整的日期范围
+        if current_data:
+            max_len = 0
+            best_index = None
+            
+            for code, series in current_data.items():
+                # 跳过低频指标
+                if self._is_low_frequency_indicator(code):
+                    continue
+                
+                if len(series) > max_len:
+                    max_len = len(series)
+                    best_index = series.index
+            
+            if best_index is not None and len(best_index) > 0:
+                return best_index
+        
+        # 策略2: 从数据库中选择一个每日更新的指标作为参考
+        for ref_code in ['VIX_LOG', 'HY_OAS', 'DFII10', 'DXY']:
+            try:
+                df = self.repository.load_series_data_by_code(ref_code, view='daily')
+                if df is not None and len(df) > 0:
+                    return df.index
+            except:
+                continue
+        
+        # 如果找不到参考，返回空索引
+        return pd.DatetimeIndex([])
+    
+    def _is_low_frequency_indicator(self, code: str) -> bool:
+        """
+        判断指标是否为低频指标（需要填充到所有交易日）
+        
+        @param {str} code - 指标代码
+        @returns {bool} 是否为低频指标
+        """
+        indicator = self.indicator_lookup.get(code, {})
+        transform = indicator.get('transform', '')
+        
+        # 检查transform中是否包含ffill（前向填充标志）
+        if 'ffill' in transform:
+            return True
+        
+        # 检查是否在低频指标列表中
+        low_freq_codes = ['TGA_D20', 'RRP_D20', 'PMI_NEWORDER_YOY_STD']
+        if code in low_freq_codes:
+            return True
+        
+        return False
+    
     def save_raw_data_only(
         self,
         raw_data: Dict[str, pd.Series],
@@ -837,12 +900,20 @@ class MarketPipeline:
         """
         只保存原始数据和转换数据到数据库（不保存评分）
         
+        对于低频指标（如TGA_D20），会自动填充到所有交易日
+        
         @param {Dict[str, pd.Series]} raw_data - 原始数据
         @param {Dict[str, pd.Series]} transformed_data - 转换后数据
         @param {str} view_type - 视图类型
         @returns {int} 保存的记录数
         """
         print(f"\n[INFO] 保存原始数据到数据库...")
+        
+        # 获取参考交易日列表（用于填充低频指标），优先从当前批次数据中获取
+        reference_trading_days = self._get_reference_trading_days(current_data=transformed_data)
+        
+        if len(reference_trading_days) > 0:
+            print(f"[INFO] 参考交易日数量: {len(reference_trading_days)}")
         
         total_saved = 0
         
@@ -852,6 +923,11 @@ class MarketPipeline:
             
             existing = self.repository.get_series_meta_by_code(code)
             if not existing:
+                # ticker可能是list，需要转换为字符串
+                ticker_value = indicator.get('ticker', '')
+                if isinstance(ticker_value, list):
+                    ticker_value = ','.join(ticker_value)
+                
                 self.repository.add_series_meta(
                     code=code,
                     name=indicator.get('name', ''),
@@ -860,7 +936,7 @@ class MarketPipeline:
                     direction=indicator.get('direction', 'up_good'),
                     transform=indicator.get('transform', 'raw'),
                     source=indicator.get('source', ''),
-                    ticker=indicator.get('ticker', '')
+                    ticker=ticker_value
                 )
         
         # 准备code到series_id的映射
@@ -889,12 +965,23 @@ class MarketPipeline:
                 continue
             
             trans_series = self._ensure_naive_series(trans_series)
+            
+            # 对低频指标，填充到所有交易日
+            is_low_freq = self._is_low_frequency_indicator(code)
+            if is_low_freq and len(reference_trading_days) > 0:
+                # 使用前向填充扩展到所有交易日
+                trans_series = trans_series.reindex(reference_trading_days, method='ffill')
+                print(f"[INFO] {code} 是低频指标，已填充到 {len(trans_series)} 个交易日")
+            
             target_index = trans_series.index
             
             if isinstance(raw_obj, pd.DataFrame):
                 if 'value_raw' not in raw_obj.columns:
                     continue
                 raw_series = self._ensure_naive_series(raw_obj['value_raw'])
+                # 对低频指标，先前向填充再对齐
+                if is_low_freq and len(reference_trading_days) > 0:
+                    raw_series = raw_series.reindex(reference_trading_days, method='ffill')
                 raw_series = self._align_raw_series(raw_series, target_index)
                 if 'value_tr' in raw_obj.columns:
                     extra_value_tr_series = self._ensure_naive_series(raw_obj['value_tr']).reindex(target_index)
@@ -905,6 +992,9 @@ class MarketPipeline:
                 print(f"[INFO] {code} 是多ticker指标，使用转换后的值作为原始值")
             elif isinstance(raw_obj, pd.Series):
                 raw_series = self._ensure_naive_series(raw_obj)
+                # 对低频指标，先前向填充再对齐
+                if is_low_freq and len(reference_trading_days) > 0:
+                    raw_series = raw_series.reindex(reference_trading_days, method='ffill')
                 raw_series = self._align_raw_series(raw_series, target_index)
             else:
                 raw_series = pd.Series(index=target_index, dtype=float)
@@ -997,6 +1087,11 @@ class MarketPipeline:
             
             existing = self.repository.get_series_meta_by_code(code)
             if not existing:
+                # ticker可能是list，需要转换为字符串
+                ticker_value = indicator.get('ticker', '')
+                if isinstance(ticker_value, list):
+                    ticker_value = ','.join(ticker_value)
+                
                 self.repository.add_series_meta(
                     code=code,
                     name=indicator.get('name', ''),
@@ -1005,7 +1100,7 @@ class MarketPipeline:
                     direction=indicator.get('direction', 'up_good'),
                     transform=indicator.get('transform', 'raw'),
                     source=indicator.get('source', ''),
-                    ticker=indicator.get('ticker', '')
+                    ticker=ticker_value
                 )
         
         # 准备code到series_id的映射
