@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -28,7 +29,14 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-pg.setConfigOptions(antialias=True, background="w", foreground="#1F2933")
+from ui.styles import CHART_STYLE
+
+# 配置PyQtGraph使用白色背景和现代化样式
+pg.setConfigOptions(
+    antialias=True,
+    background=CHART_STYLE['background'],
+    foreground=CHART_STYLE['foreground']
+)
 
 
 class DateAxisItem(pg.AxisItem):
@@ -70,11 +78,20 @@ class IndicatorChartWidget(QWidget):
         # 顶部信息区
         self._status_label = QLabel("选择指标以加载数据")
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self._status_label.setStyleSheet("color: #5B6470;")
+        self._status_label.setStyleSheet(f"""
+            color: {CHART_STYLE['text_color']};
+            font-size: 13px;
+            padding: 4px;
+        """)
 
         self._info_label = QLabel("悬停显示数值")
         self._info_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._info_label.setStyleSheet("color: #5B6470;")
+        self._info_label.setStyleSheet(f"""
+            color: {CHART_STYLE['text_color']};
+            font-size: 12px;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            padding: 4px;
+        """)
 
         self._value_mode = "raw"  # 'raw' or 'transformed'
         self._toggle_btn = QPushButton("显示转换值")
@@ -101,13 +118,26 @@ class IndicatorChartWidget(QWidget):
             axisItems={"bottom": DateAxisItem(orientation="bottom")},
         )
         self._plot.setMenuEnabled(False)
-        self._plot.showGrid(x=True, y=True, alpha=0.25)
-        self._plot.getAxis("left").setLabel("原始/转换值", color="#1F2933")
-        self._plot.getAxis("left").setPen(pg.mkPen("#1F2933"))
+        
+        # 网格线样式 - 浅灰色，更细腻
+        self._plot.showGrid(x=True, y=True, alpha=0.15)
+        
+        # 左侧Y轴样式 - 主数据
+        left_axis = self._plot.getAxis("left")
+        left_axis.setLabel("原始/转换值", color=CHART_STYLE['foreground'])
+        left_axis.setPen(pg.mkPen(CHART_STYLE['grid_color'], width=1))
+        left_axis.setTextPen(CHART_STYLE['text_color'])
+        
+        # 底部X轴样式
+        bottom_axis = self._plot.getAxis("bottom")
+        bottom_axis.setPen(pg.mkPen(CHART_STYLE['grid_color'], width=1))
+        bottom_axis.setTextPen(CHART_STYLE['text_color'])
 
+        # 右侧Y轴样式 - Score
         self._score_axis = self._plot.getAxis("right")
-        self._score_axis.setLabel("Score (0-100)", color="#E65100")
-        self._score_axis.setPen(pg.mkPen("#E65100"))
+        self._score_axis.setLabel("Score (0-100)", color=CHART_STYLE['line_colors'][2])
+        self._score_axis.setPen(pg.mkPen(CHART_STYLE['line_colors'][2], width=1))
+        self._score_axis.setTextPen(CHART_STYLE['line_colors'][2])
 
         self._score_view = pg.ViewBox()
         self._plot.scene().addItem(self._score_view)
@@ -115,41 +145,48 @@ class IndicatorChartWidget(QWidget):
         self._score_view.setXLink(self._plot)
         self._plot.vb.sigResized.connect(self._update_views)
 
-        # 主线与标记
-        self._price_curve = self._plot.plot(pen=pg.mkPen("#1976D2", width=2))
+        # 主线与标记 - 使用现代化蓝色
+        primary_color = CHART_STYLE['line_colors'][0]
+        self._price_curve = self._plot.plot(pen=pg.mkPen(primary_color, width=2.5))
         self._price_marker = pg.ScatterPlotItem(
-            size=8,
-            brush=pg.mkBrush("#1976D2"),
-            pen=pg.mkPen("w", width=1.2),
+            size=10,
+            brush=pg.mkBrush(primary_color),
+            pen=pg.mkPen('w', width=2),
         )
         self._plot.addItem(self._price_marker)
 
-        # Score线与阈值
-        self._score_curve = pg.PlotCurveItem(pen=pg.mkPen("#E65100", width=1.8))
+        # Score线与阈值 - 使用现代化颜色
+        score_color = CHART_STYLE['line_colors'][2]
+        success_color = CHART_STYLE['line_colors'][1]
+        danger_color = CHART_STYLE['line_colors'][3]
+        
+        self._score_curve = pg.PlotCurveItem(pen=pg.mkPen(score_color, width=2))
         self._score_view.addItem(self._score_curve)
         self._score_marker = pg.ScatterPlotItem(
-            size=8,
-            brush=pg.mkBrush("#E65100"),
-            pen=pg.mkPen("w", width=1.2),
+            size=10,
+            brush=pg.mkBrush(score_color),
+            pen=pg.mkPen('w', width=2),
         )
         self._score_view.addItem(self._score_marker)
 
+        # 阈值线 - 绿色(60分)和红色(40分)
         self._threshold_green = pg.InfiniteLine(
             angle=0,
             pos=60,
-            pen=pg.mkPen("#66BB6A", width=1.2, style=Qt.PenStyle.DashLine),
+            pen=pg.mkPen(success_color, width=1.5, style=Qt.PenStyle.DashLine),
         )
         self._threshold_red = pg.InfiniteLine(
             angle=0,
             pos=40,
-            pen=pg.mkPen("#EF5350", width=1.2, style=Qt.PenStyle.DashLine),
+            pen=pg.mkPen(danger_color, width=1.5, style=Qt.PenStyle.DashLine),
         )
         self._score_view.addItem(self._threshold_green)
         self._score_view.addItem(self._threshold_red)
 
-        # 十字准星
-        self._v_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#94A3B8", width=1))
-        self._h_line = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#94A3B8", width=1))
+        # 十字准星 - 更细腻的灰色
+        crosshair_color = CHART_STYLE['grid_color']
+        self._v_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(crosshair_color, width=1))
+        self._h_line = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen(crosshair_color, width=1))
         self._plot.addItem(self._v_line, ignoreBounds=True)
         self._plot.addItem(self._h_line, ignoreBounds=True)
         self._v_line.hide()

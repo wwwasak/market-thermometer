@@ -2,7 +2,7 @@
   "regime": {
     "attack_threshold": 70,
     "defense_threshold": 40,
-    "attack_threshold_CN": 54,
+    "attack_threshold_CN": 53,
     "defense_threshold_CN": 40,
     "attack_threshold_US": 50,
     "defense_threshold_US": null,
@@ -50,11 +50,11 @@
     "CN": {
       "Attack": [
         50,
-        4,
-        24,
+        2,
+        34,
         10,
         2,
-        10
+        2
       ],
       "Balanced": [
         20,
@@ -92,11 +92,11 @@
       ],
       "Defense": [
         18,
-        12,
+        8,
         24,
         18,
         27,
-        1
+        5
       ]
     }
   },

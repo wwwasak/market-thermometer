@@ -2,9 +2,10 @@
 主窗口模块
 
 实现基于PyQt6的现代化界面：
-- 左侧控制面板：市场筛选、角色筛选、搜索、日期范围、视图选择、指标列表
+- 左侧控制面板：市场筛选、角色筛选、日期范围、视图选择、指标列表（可调整大小）
 - 右侧图表区域：股票软件风格的折线图，支持导出/缩放/十字光标等
 - 底部状态栏：显示记录数、日期范围、灯色信息
+- 字体大小：支持全局调整（小/中/大）
 
 所有数据均从SQLite数据库加载，遵循demand.txt中对GUI与数据展示的设计要求。
 """
@@ -17,7 +18,7 @@ from pathlib import Path
 
 import pandas as pd
 from PyQt6.QtCore import QDate, QModelIndex, Qt, pyqtSignal, QThread
-from PyQt6.QtGui import QStandardItem, QStandardItemModel
+from PyQt6.QtGui import QStandardItem, QStandardItemModel, QAction
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -42,7 +43,7 @@ from core.config import Config
 from storage.repository import Repository
 from ui.charts import IndicatorChartWidget, IndicatorDisplayConfig
 from ui.market_overview import MarketOverviewWidget
-from ui.styles import MAIN_WINDOW_QSS
+from ui.styles import MAIN_WINDOW_QSS, get_styled_qss
 
 
 class ManualFetchWorker(QThread):
@@ -93,8 +94,6 @@ class IndicatorListModel(QStandardItemModel):
         item = QStandardItem(f"{meta['code']} · {meta['name']}")
         item.setEditable(False)
         item.setData(meta, Qt.ItemDataRole.UserRole)
-        search_key = f"{meta.get('code', '')} {meta.get('name', '')} {meta.get('market', '')} {meta.get('role', '')}"
-        item.setData(search_key.lower(), Qt.ItemDataRole.UserRole + 1)
         self.appendRow(item)
 
 
@@ -121,11 +120,6 @@ class IndicatorControlPanel(QWidget):
         self.view_combo = QComboBox()
         self.view_combo.addItems(["日线 (daily)", "周线 (weekly)"])
         self.view_combo.currentIndexChanged.connect(self._emit_filters_changed)
-
-        # 搜索
-        self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("搜索代码或名称…")
-        self.search_edit.textChanged.connect(self._emit_filters_changed)
 
         # 日期范围
         self.start_date_edit = QDateEdit()
@@ -160,7 +154,6 @@ class IndicatorControlPanel(QWidget):
         layout.addWidget(self._build_group("市场", self.market_combo))
         layout.addWidget(self._build_group("角色", self.role_combo))
         layout.addWidget(self._build_group("视图", self.view_combo))
-        layout.addWidget(self._build_group("搜索", self.search_edit))
 
         date_frame = QFrame()
         date_layout = QVBoxLayout(date_frame)
@@ -173,7 +166,7 @@ class IndicatorControlPanel(QWidget):
         layout.addWidget(self._build_group("日期范围", date_frame))
 
         list_label = QLabel("指标列表")
-        list_label.setStyleSheet("font-weight: 600;")
+        list_label.setProperty("labelStyle", "subtitle")
         layout.addWidget(list_label)
         layout.addWidget(self.list_view, stretch=1)
         layout.addWidget(self.manual_fetch_btn)
@@ -210,7 +203,6 @@ class IndicatorControlPanel(QWidget):
         return {
             "market": self.market_combo.currentText(),
             "role": self.role_combo.currentText(),
-            "search": self.search_edit.text(),
         }
 
     def set_manual_fetch_enabled(self, enabled: bool) -> None:
@@ -281,9 +273,13 @@ class ThermometerMainWindow(QMainWindow):
         self.repository = Repository(database_url)
         self._manual_fetch_worker: Optional[ManualFetchWorker] = None
         self._current_indicator: Optional[Dict] = None
+        self._current_font_size = 'medium'  # 当前字体大小
 
         self.setWindowTitle("双市场温度计 · 图表终端")
         self.resize(1400, 840)
+        
+        # 创建菜单栏
+        self._create_menu_bar()
 
         self.control_panel = IndicatorControlPanel()
         self.control_panel.indicator_selected.connect(self._on_indicator_selected)
@@ -322,8 +318,8 @@ class ThermometerMainWindow(QMainWindow):
         self.setStatusBar(status_bar)
         self.record_label = QLabel("记录: -")
         self.lamp_label = QLabel("灯色: -")
-        self.record_label.setStyleSheet("color: #5B6470;")
-        self.lamp_label.setStyleSheet("color: #5B6470;")
+        self.record_label.setProperty("labelStyle", "small")
+        self.lamp_label.setProperty("labelStyle", "small")
         status_bar.addPermanentWidget(self.record_label)
         status_bar.addPermanentWidget(self.lamp_label)
 
@@ -338,6 +334,66 @@ class ThermometerMainWindow(QMainWindow):
 
         if self._all_indicators:
             self._on_indicator_selected(self._all_indicators[0])
+    
+    def _create_menu_bar(self) -> None:
+        """创建菜单栏"""
+        menubar = self.menuBar()
+        
+        # 视图菜单
+        view_menu = menubar.addMenu("视图(&V)")
+        
+        # 字体大小子菜单
+        font_size_menu = view_menu.addMenu("字体大小")
+        
+        # 小号字体
+        small_font_action = QAction("小号 (11px)", self)
+        small_font_action.setCheckable(True)
+        small_font_action.triggered.connect(lambda: self._change_font_size('small'))
+        font_size_menu.addAction(small_font_action)
+        
+        # 中号字体（默认）
+        medium_font_action = QAction("中号 (13px)", self)
+        medium_font_action.setCheckable(True)
+        medium_font_action.setChecked(True)
+        medium_font_action.triggered.connect(lambda: self._change_font_size('medium'))
+        font_size_menu.addAction(medium_font_action)
+        
+        # 大号字体
+        large_font_action = QAction("大号 (15px)", self)
+        large_font_action.setCheckable(True)
+        large_font_action.triggered.connect(lambda: self._change_font_size('large'))
+        font_size_menu.addAction(large_font_action)
+        
+        # 将动作组合，使其互斥
+        self._font_size_actions = {
+            'small': small_font_action,
+            'medium': medium_font_action,
+            'large': large_font_action,
+        }
+    
+    def _change_font_size(self, size: str) -> None:
+        """
+        切换字体大小
+        
+        @param {str} size - 字体大小 ('small', 'medium', 'large')
+        """
+        if size not in ['small', 'medium', 'large']:
+            return
+        
+        # 更新当前字体大小
+        self._current_font_size = size
+        
+        # 更新菜单项选中状态
+        for key, action in self._font_size_actions.items():
+            action.setChecked(key == size)
+        
+        # 应用新的样式表
+        styled_qss = get_styled_qss(size)
+        self.setStyleSheet(styled_qss)
+        
+        # 更新状态栏提示
+        size_names = {'small': '小号', 'medium': '中号', 'large': '大号'}
+        self.statusBar().showMessage(f"字体大小已切换为: {size_names[size]}", 2000)
 
     # -- 数据加载 --
     def _load_indicator_meta(self) -> List[Dict]:
@@ -347,7 +403,6 @@ class ThermometerMainWindow(QMainWindow):
 
     def _apply_filters(self) -> None:
         filters = self.control_panel.current_filters()
-        search = filters["search"].lower()
         market = filters["market"]
         role = filters["role"]
 
@@ -356,9 +411,6 @@ class ThermometerMainWindow(QMainWindow):
             if market != "全部市场" and meta.get("market") != market:
                 continue
             if role != "全部角色" and meta.get("role") != role:
-                continue
-            key = f"{meta.get('code', '').lower()} {meta.get('name', '').lower()}"
-            if search and search not in key:
                 continue
             filtered.append(meta)
 
