@@ -558,6 +558,8 @@ class MarketPipeline:
         @param {Dict[str, pd.Series]} transformed_data - 转换后的数据
         @param {str} view_type - 视图类型（'daily' 或 'weekly'）
         @returns {Tuple[pd.DataFrame, pd.Series]} (评分结果DataFrame, 综合评分Series)
+        
+        注意：评分只针对交易日（周一至周五）计算，周六日将被排除
         """
         print(f"\n[INFO] 计算 {view_type} 评分...")
         
@@ -649,8 +651,21 @@ class MarketPipeline:
         all_dates = pd.to_datetime(all_dates, utc=True)
         all_dates = all_dates.tz_localize(None)
         all_dates = all_dates.sort_values()
+        
+        # **关键修复：只保留交易日（周一至周五），排除周六日**
+        # 使用pandas的工作日判断：0=周一, 1=周二, ..., 4=周五, 5=周六, 6=周日
+        is_business_day = all_dates.dayofweek < 5  # 0-4 是周一到周五
+        trading_days = all_dates[is_business_day]
+        
+        non_trading_count = len(all_dates) - len(trading_days)
+        if non_trading_count > 0:
+            print(f"[INFO] 过滤掉 {non_trading_count} 个非交易日（周六日）")
+            print(f"[INFO] 保留 {len(trading_days)} 个交易日用于评分")
+        
+        # 使用过滤后的交易日作为评分的日期索引
+        all_dates = trading_days
 
-        # 对齐原始转换数据
+        # 对齐原始转换数据（只对齐到交易日）
         df = pd.DataFrame(
             {code: transformed_data[code].reindex(all_dates) for code in scoring_codes},
             index=all_dates
@@ -660,9 +675,13 @@ class MarketPipeline:
         if view_type == 'weekly':
             print("[INFO] 重采样到周度...")
             df = df.resample('W-FRI').last()
-            # 也需要重采样Z分数和评分
-            z_dict = {code: z.resample('W-FRI').last() for code, z in z_dict.items()}
-            score_dict = {code: score.resample('W-FRI').last() for code, score in score_dict.items()}
+            # 也需要重采样Z分数和评分（重采样后的数据已经是交易日）
+            z_dict = {code: z.reindex(all_dates).resample('W-FRI').last() for code, z in z_dict.items()}
+            score_dict = {code: score.reindex(all_dates).resample('W-FRI').last() for code, score in score_dict.items()}
+        else:
+            # 对于日度视图，需要将z_dict和score_dict也重新索引到交易日
+            z_dict = {code: z.reindex(all_dates) for code, z in z_dict.items()}
+            score_dict = {code: score.reindex(all_dates) for code, score in score_dict.items()}
         
         # 合并z-score和score到DataFrame
         result_data = {}

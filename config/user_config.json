@@ -49,12 +49,12 @@
   "style_weights": {
     "CN": {
       "Attack": [
-        50,
+        48,
         2,
         34,
         10,
         2,
-        2
+        4
       ],
       "Balanced": [
         20,
