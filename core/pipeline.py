@@ -727,6 +727,25 @@ class MarketPipeline:
                     {code: score_dict.get(code, pd.Series(dtype=float)) for code in main_codes_with_scores}
                 )
                 
+                # **关键修改：对评分矩阵应用 forward fill**
+                # 确保每个交易日所有指标都有值（使用之前的最新有效数据）
+                # 这样可以保证所有维度都参与综合评分的计算，权重不会动态调整
+                score_matrix_filled = score_matrix.ffill()
+                
+                # 检查 forward fill 的效果
+                null_counts_before = score_matrix.isnull().sum()
+                null_counts_after = score_matrix_filled.isnull().sum()
+                
+                for code in main_codes_with_scores:
+                    before = null_counts_before.get(code, 0)
+                    after = null_counts_after.get(code, 0)
+                    if before > 0:
+                        filled = before - after
+                        if filled > 0:
+                            print(f"[INFO] {code}: 前向填充了 {filled} 个缺失值")
+                        if after > 0:
+                            print(f"[WARN] {code}: 仍有 {after} 个缺失值（开头部分）")
+                
                 # 根据指标在main_indicators中的位置提取对应权重
                 weights = []
                 for code in main_codes_with_scores:
@@ -745,8 +764,9 @@ class MarketPipeline:
                 elif len(weights) > 0:
                     from core.scoring import weighted_score
                     
-                    # 注意：weighted_score会在每个时间点只使用那些非空的指标进行加权
-                    composite_score = weighted_score(score_matrix, weights, normalize=True)
+                    # 使用填充后的评分矩阵计算综合评分
+                    # 现在每个时间点所有指标都有值，权重保持不变
+                    composite_score = weighted_score(score_matrix_filled, weights, normalize=True)
                     
                     # 检查综合评分是否有效
                     valid_count = composite_score.notna().sum()

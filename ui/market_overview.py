@@ -166,7 +166,9 @@ class ScoreCalculationWorker(QThread):
                 if is_today_trading_day:
                     # 今天是交易日，检查是否有指标缺少今天的数据
                     for ind in completeness_report['missing_indicators']:
-                        if ind['days_ago'] == 0:
+                        # 只要有指标的数据不是今天的（days_ago > 0），就需要用户确认
+                        # 例如：今天24日，指标数据是20日，days_ago=4，应该提示用户
+                        if ind['days_ago'] is not None and ind['days_ago'] > 0:
                             # 有指标缺少今天的数据，需要用户确认
                             need_user_confirmation = True
                             break
