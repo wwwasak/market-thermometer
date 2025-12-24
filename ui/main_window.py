@@ -276,6 +276,7 @@ class ThermometerMainWindow(QMainWindow):
         self._current_font_size = 'medium'  # 当前字体大小
 
         self.setWindowTitle("双市场温度计 · 图表终端")
+        # 先设置一个合理的默认大小（如果用户还原窗口时使用）
         self.resize(1400, 840)
         
         # 创建菜单栏
@@ -334,6 +335,21 @@ class ThermometerMainWindow(QMainWindow):
 
         if self._all_indicators:
             self._on_indicator_selected(self._all_indicators[0])
+        
+        # 标记需要保持最大化状态
+        self._keep_maximized = True
+        
+        # 设置窗口大小约束，防止子控件影响窗口大小
+        # 获取屏幕大小
+        screen = QApplication.primaryScreen().geometry()
+        # 设置最小大小为合理值，最大大小为屏幕大小
+        self.setMinimumSize(800, 600)
+        self.setMaximumSize(screen.width(), screen.height())
+        
+        # 在所有控件创建完成后，最大化窗口
+        # 使用 QTimer 延迟调用，确保所有控件完全初始化
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, self.showMaximized)
     
     def _create_menu_bar(self) -> None:
         """创建菜单栏"""
@@ -370,6 +386,35 @@ class ThermometerMainWindow(QMainWindow):
             'medium': medium_font_action,
             'large': large_font_action,
         }
+    
+    def resizeEvent(self, event):
+        """
+        重写窗口大小改变事件，防止非用户操作导致的大小变化
+        """
+        super().resizeEvent(event)
+        
+        # 如果需要保持最大化，检查当前状态
+        if hasattr(self, '_keep_maximized') and self._keep_maximized:
+            if not self.isMaximized() and not self.isMinimized():
+                # 阻止非用户操作的大小变化
+                # 使用 blockSignals 暂时阻止信号，避免递归
+                self.blockSignals(True)
+                self.showMaximized()
+                self.blockSignals(False)
+    
+    def changeEvent(self, event):
+        """
+        监控窗口状态变化，强制保持最大化
+        """
+        super().changeEvent(event)
+        
+        # 监控窗口状态变化
+        if event.type() == event.Type.WindowStateChange:
+            if hasattr(self, '_keep_maximized') and self._keep_maximized:
+                # 如果不是最大化状态，立即恢复
+                if not self.isMaximized() and not self.isMinimized():
+                    # 使用 setWindowState 直接设置状态，更快
+                    self.setWindowState(Qt.WindowState.WindowMaximized)
     
     def _change_font_size(self, size: str) -> None:
         """
@@ -542,6 +587,7 @@ def launch_gui(database_url: Optional[str] = None):
     """启动主窗口"""
     app = QApplication.instance() or QApplication([])
     window = ThermometerMainWindow(database_url=database_url)
-    window.show()
+    # 窗口会通过构造函数中的 showMaximized() 显示，这里不需要再调用 show()
+    # window.show() 会覆盖 showMaximized() 的效果
     app.exec()
 

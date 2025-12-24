@@ -608,6 +608,10 @@ class CompositeScoreChart(QWidget):
         pg.setConfigOptions(antialias=True, background="w", foreground="#1F2933")
         self.graphics = pg.GraphicsLayoutWidget()
         
+        # 设置图表的大小策略，防止其影响父窗口大小
+        from PyQt6.QtWidgets import QSizePolicy
+        self.graphics.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        
         # 使用DateAxisItem作为X轴
         date_axis = pg.DateAxisItem(orientation='bottom')
         self.plot = self.graphics.addPlot(row=0, col=0, axisItems={'bottom': date_axis})
@@ -672,6 +676,10 @@ class CompositeScoreChart(QWidget):
         self.info_label = QLabel("选择日期范围以加载数据")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.info_label.setStyleSheet("color: #5B6470;")
+        
+        # 设置整个图表控件的大小策略
+        from PyQt6.QtWidgets import QSizePolicy
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         
         # 布局
         layout = QVBoxLayout(self)
