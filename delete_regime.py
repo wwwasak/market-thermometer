@@ -43,7 +43,7 @@ if __name__ == '__main__':
     # 修改这里的参数
     delete_regime(
         market='CN',           # 'CN' 或 'US'
-        date_str='2025-10-6'  # 'YYYY-MM-DD'
+        date_str='2025-12-23'  # 'YYYY-MM-DD'
       
     )
 

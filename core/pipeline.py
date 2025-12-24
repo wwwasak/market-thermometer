@@ -764,6 +764,132 @@ class MarketPipeline:
         
         return result_df, composite_score
     
+    def check_today_data_completeness(
+        self,
+        transformed_data: Dict[str, pd.Series],
+        target_date: Optional[datetime] = None
+    ) -> Dict[str, Any]:
+        """
+        检查指定日期（默认今天）的主指标数据完整性
+        
+        @param {Dict[str, pd.Series]} transformed_data - 转换后的数据
+        @param {Optional[datetime]} target_date - 目标日期（默认为今天）
+        @returns {Dict[str, Any]} 完整性报告
+        
+        返回格式：
+        {
+            'target_date': datetime,
+            'all_complete': bool,
+            'missing_indicators': [
+                {
+                    'code': str,
+                    'name': str,
+                    'latest_date': datetime,
+                    'days_ago': int
+                },
+                ...
+            ],
+            'complete_indicators': [str, ...],
+            'main_indicator_count': int,
+            'complete_count': int
+        }
+        """
+        if target_date is None:
+            target_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # 确保是pandas Timestamp
+        target_date = pd.Timestamp(target_date)
+        
+        print(f"\n[INFO] 检查 {target_date.date()} 的数据完整性...")
+        
+        # 获取主指标列表
+        main_indicators = [
+            ind for ind in self.indicators 
+            if ind.get('role') == 'main'
+        ]
+        
+        missing_indicators = []
+        complete_indicators = []
+        
+        for ind in main_indicators:
+            code = ind['code']
+            name = ind.get('name', code)
+            
+            if code not in transformed_data:
+                # 指标完全不存在
+                missing_indicators.append({
+                    'code': code,
+                    'name': name,
+                    'latest_date': None,
+                    'days_ago': None,
+                    'has_data': False
+                })
+                continue
+            
+            series = transformed_data[code]
+            
+            if len(series) == 0:
+                # 指标没有数据
+                missing_indicators.append({
+                    'code': code,
+                    'name': name,
+                    'latest_date': None,
+                    'days_ago': None,
+                    'has_data': False
+                })
+                continue
+            
+            # 检查是否有目标日期的数据
+            if target_date in series.index and pd.notna(series[target_date]):
+                # 有当日数据
+                complete_indicators.append(code)
+            else:
+                # 没有当日数据，找最近的数据
+                valid_data = series.dropna()
+                if len(valid_data) > 0:
+                    latest_date = valid_data.index[-1]
+                    days_ago = (target_date - latest_date).days
+                    
+                    missing_indicators.append({
+                        'code': code,
+                        'name': name,
+                        'latest_date': latest_date,
+                        'days_ago': days_ago,
+                        'has_data': True
+                    })
+                else:
+                    missing_indicators.append({
+                        'code': code,
+                        'name': name,
+                        'latest_date': None,
+                        'days_ago': None,
+                        'has_data': False
+                    })
+        
+        all_complete = len(missing_indicators) == 0
+        
+        report = {
+            'target_date': target_date,
+            'all_complete': all_complete,
+            'missing_indicators': missing_indicators,
+            'complete_indicators': complete_indicators,
+            'main_indicator_count': len(main_indicators),
+            'complete_count': len(complete_indicators)
+        }
+        
+        # 打印报告
+        if all_complete:
+            print(f"[OK] 所有 {len(main_indicators)} 个主指标都有 {target_date.date()} 的数据")
+        else:
+            print(f"[WARN] {len(missing_indicators)}/{len(main_indicators)} 个主指标缺少 {target_date.date()} 的数据:")
+            for ind in missing_indicators:
+                if ind['has_data']:
+                    print(f"  • {ind['code']} ({ind['name']}): 最新数据为 {ind['latest_date'].date()}, {ind['days_ago']}天前")
+                else:
+                    print(f"  • {ind['code']} ({ind['name']}): 完全没有数据")
+        
+        return report
+    
     def apply_confirm_layer(
         self,
         scores: pd.DataFrame,

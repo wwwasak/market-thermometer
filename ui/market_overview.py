@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QProgressDialog,
     QDoubleSpinBox,
     QSpinBox,
+    QDialog,
 )
 import pyqtgraph as pg
 
@@ -48,6 +49,7 @@ class ScoreCalculationWorker(QThread):
     progress = pyqtSignal(str)  # 进度消息
     completed = pyqtSignal(dict)  # 完成信号
     failed = pyqtSignal(str)  # 失败信号
+    completeness_check = pyqtSignal(dict, object)  # 数据完整性检查信号 (report, pipeline)
     
     def __init__(
         self,
@@ -62,6 +64,18 @@ class ScoreCalculationWorker(QThread):
         self.market = market
         self.view = view
         self.config = config
+        self.user_choice = None  # 用户选择：'use_latest', 'skip', 'cancel'
+        self._wait_for_user = False  # 是否等待用户选择
+        self._skip_today = False  # 是否跳过今天的评分
+    
+    def set_user_choice(self, choice: str):
+        """
+        设置用户选择并继续执行
+        
+        @param {str} choice - 'use_latest', 'skip', 或 'cancel'
+        """
+        self.user_choice = choice
+        self._wait_for_user = False
     
     def run(self):
         """执行评分计算"""
@@ -131,12 +145,84 @@ class ScoreCalculationWorker(QThread):
                 transformed_data
             )
             
+            # **新增：检查今天的数据完整性**
+            self.progress.emit("检查数据完整性...")
+            from datetime import datetime
+            today = datetime.now()
+            completeness_report = pipeline.check_today_data_completeness(
+                transformed_data,
+                target_date=today
+            )
+            
+            # 判断是否需要弹窗：只有当日数据缺失时才弹窗
+            # 历史数据缺失自动使用最近有效数据
+            need_user_confirmation = False
+            
+            if not completeness_report['all_complete']:
+                # 检查缺失的是当日数据还是历史数据
+                # 如果是今天（周一到周五的交易日），才需要用户确认
+                is_today_trading_day = today.weekday() < 5  # 0-4是周一到周五
+                
+                if is_today_trading_day:
+                    # 今天是交易日，检查是否有指标缺少今天的数据
+                    for ind in completeness_report['missing_indicators']:
+                        if ind['days_ago'] == 0:
+                            # 有指标缺少今天的数据，需要用户确认
+                            need_user_confirmation = True
+                            break
+                
+                if need_user_confirmation:
+                    self.progress.emit("发现部分指标缺少当日数据，等待用户选择...")
+                    
+                    # 发送信号并等待用户选择
+                    self._wait_for_user = True
+                    self.completeness_check.emit(completeness_report, pipeline)
+                    
+                    # 等待用户选择（通过事件循环）
+                    while self._wait_for_user:
+                        self.msleep(100)  # 等待100ms
+                    
+                    # 检查用户选择
+                    if self.user_choice == 'cancel':
+                        self.progress.emit("用户取消了评分计算")
+                        self.failed.emit("用户取消了评分计算")
+                        return
+                    elif self.user_choice == 'skip':
+                        self.progress.emit("用户选择跳过当日评分，将计算历史数据但排除今天")
+                        # 继续计算，但在后续步骤中排除今天的数据
+                        # 设置标志，让后续逻辑知道要排除今天
+                        self._skip_today = True
+                    elif self.user_choice == 'use_latest':
+                        self.progress.emit("用户选择使用最近数据，继续计算评分...")
+                        # 继续执行，使用现有数据计算评分
+                else:
+                    # 历史数据缺失，自动使用最近有效数据
+                    missing_count = len(completeness_report['missing_indicators'])
+                    self.progress.emit(f"检测到 {missing_count} 个指标的历史数据有缺失，自动使用最近有效数据计算评分...")
+            else:
+                self.progress.emit("所有主指标数据完整，继续计算评分...")
+            
             # 计算评分（日度）
             self.progress.emit("计算日度评分...")
             scores_daily, composite_daily = pipeline.calculate_scores(
                 transformed_data,
                 view_type='daily'
             )
+            
+            # **如果用户选择跳过今天，从评分结果中移除今天的数据**
+            if self._skip_today:
+                today = datetime.now().date()
+                today_timestamp = pd.Timestamp(today)
+                
+                # 从scores_daily中移除今天的数据
+                if today_timestamp in scores_daily.index:
+                    scores_daily = scores_daily[scores_daily.index != today_timestamp]
+                    self.progress.emit(f"已移除今天({today})的评分数据")
+                
+                # 从composite_daily中移除今天的数据
+                if today_timestamp in composite_daily.index:
+                    composite_daily = composite_daily[composite_daily.index != today_timestamp]
+                    self.progress.emit(f"已移除今天({today})的综合评分")
             
             # 调试信息：检查评分数据
             self.progress.emit(f"评分DataFrame形状: {scores_daily.shape}")
@@ -1512,12 +1598,66 @@ class MarketOverviewWidget(QWidget):
             parent=self
         )
         
+        self._calc_worker.completeness_check.connect(self._on_completeness_check)
         self._calc_worker.progress.connect(self._on_calculation_progress)
         self._calc_worker.completed.connect(self._on_calculation_completed)
         self._calc_worker.failed.connect(self._on_calculation_failed)
         self._calc_worker.finished.connect(self._on_calculation_finished)
         
         self._calc_worker.start()
+    
+    def _on_completeness_check(self, report: dict, pipeline: object) -> None:
+        """
+        处理数据完整性检查
+        
+        @param {dict} report - 完整性报告
+        @param {object} pipeline - MarketPipeline实例（未使用，仅用于信号传递）
+        """
+        from ui.data_completeness_dialog import DataCompletenessDialog
+        
+        # **修复：完全关闭进度对话框，避免阻塞**
+        if self._progress_dialog:
+            self._progress_dialog.close()
+            self._progress_dialog = None
+        
+        # 显示数据完整性对话框
+        dialog = DataCompletenessDialog(
+            completeness_report=report,
+            market=self.market_combo.currentText(),
+            parent=self
+        )
+        
+        result = dialog.exec()
+        user_choice = dialog.get_user_choice()
+        
+        # **修复：重新创建进度对话框**
+        self._progress_dialog = QProgressDialog(
+            "正在计算评分...",
+            "取消",
+            0,
+            0,
+            self
+        )
+        self._progress_dialog.setWindowTitle("计算评分")
+        self._progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self._progress_dialog.setMinimumDuration(0)
+        self._progress_dialog.canceled.connect(self._on_calculation_canceled)
+        self._progress_dialog.show()
+        
+        # 将用户选择传递给Worker线程
+        if self._calc_worker:
+            if result == QDialog.DialogCode.Accepted:
+                # 用户接受了
+                if user_choice == 'use_latest':
+                    self._calc_worker.set_user_choice('use_latest')
+                elif user_choice == 'skip':
+                    self._calc_worker.set_user_choice('skip')
+                elif user_choice is None:
+                    # 数据完整，直接继续
+                    self._calc_worker.set_user_choice('use_latest')
+            else:
+                # 用户取消了
+                self._calc_worker.set_user_choice('cancel')
     
     def _on_calculation_progress(self, message: str) -> None:
         """计算进度更新"""
@@ -1529,7 +1669,29 @@ class MarketOverviewWidget(QWidget):
         if self._progress_dialog:
             self._progress_dialog.close()
         
-        # 显示结果
+        # 检查是否是跳过的情况
+        if result.get('skipped'):
+            QMessageBox.information(
+                self,
+                "已跳过评分",
+                f"{result['market']} 市场：\n\n"
+                f"{result.get('message', '用户选择跳过当日评分')}\n\n"
+                f"提示：请先获取最新数据，然后再重新计算评分。"
+            )
+            return
+        
+        # 正常完成的情况
+        if not result.get('success'):
+            # 失败但不是跳过
+            QMessageBox.warning(
+                self,
+                "计算未完成",
+                f"{result['market']} 市场评分计算未完成。\n\n"
+                f"{result.get('message', '未知原因')}"
+            )
+            return
+        
+        # 显示成功结果
         date_range = result.get('date_range', (None, None))
         date_str = ""
         if date_range[0] and date_range[1]:
@@ -1579,6 +1741,9 @@ class MarketOverviewWidget(QWidget):
             )
             
             if reply == QMessageBox.StandardButton.Yes:
+                # 先通知Worker取消
+                self._calc_worker.set_user_choice('cancel')
+                # 等待线程结束
                 self._calc_worker.terminate()
                 self._calc_worker.wait()
                 QMessageBox.information(self, "已取消", "评分计算已取消。")
