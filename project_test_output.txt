@@ -1,0 +1,76 @@
+﻿python : Traceback (most recent call last):
+所在位置 C:\Users\59546\AppData\Local\Temp\ps-script-08eb79d2-9f24-40ba-9b2a-b5f5086d0591.ps1:93 字符: 1
++ python test_project_datasource.py 2>&1 | Out-File -Encoding UTF8 proj ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "D:\code\MyCode\market-thermometer\test_project_datasource.py", line 131, in <module>
+    print(f"\n\u2717 Series缺少12月26日数据")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'gbk' codec can't encode character '\u2717' in position 2: illegal multibyte sequence
+================================================================================
+测试项目的数据获取流程
+================================================================================
+测试时间: 2025-12-27 19:09:11
+
+步骤1: 使用项目的DataSourceManager获取数据
+--------------------------------------------------------------------------------
+配置: {'code': 'IWM_SPY_REL20', 'name': 'IWM/SPY 20日相对收益', 'source': 'yfinance', 'ticker': ['IWM', 'SPY'], 'transform': 'relret20'}
+日期范围: 2025-11-27 至 2025-12-27
+
+[OK] Fetched 20 records for IWM
+[OK] Fetched 20 records for SPY
+[OK] 获取成功
+    数据类型: <class 'tuple'>
+    tuple长度: 2
+
+    Series 0:
+      长度: 20
+      日期范围: 2025-11-28 00:00:00-05:00 至 2025-12-26 00:00:00-05:00
+      最后3条:
+Date
+2025-12-23 00:00:00-05:00    252.080002
+2025-12-24 00:00:00-05:00    252.710007
+2025-12-26 00:00:00-05:00    251.419998
+Name: Close, dtype: float64
+      [ERROR] 没有12月26日数据
+      最新日期: 2025-12-26 00:00:00-05:00
+
+    Series 1:
+      长度: 20
+      日期范围: 2025-11-28 00:00:00-05:00 至 2025-12-26 00:00:00-05:00
+      最后3条:
+Date
+2025-12-23 00:00:00-05:00    687.960022
+2025-12-24 00:00:00-05:00    690.380005
+2025-12-26 00:00:00-05:00    690.309998
+Name: Close, dtype: float64
+      [ERROR] 没有12月26日数据
+      最新日期: 2025-12-26 00:00:00-05:00
+
+================================================================================
+步骤2: 手动计算relret20
+--------------------------------------------------------------------------------
+对齐后长度: IWM=20, SPY=20
+relret20计算完成，长度: 20
+最后5条:
+Date
+2025-12-19 00:00:00-05:00   NaN
+2025-12-22 00:00:00-05:00   NaN
+2025-12-23 00:00:00-05:00   NaN
+2025-12-24 00:00:00-05:00   NaN
+2025-12-26 00:00:00-05:00   NaN
+Name: Close, dtype: float64
+
+[ERROR] relret20中没有12月26日
+最新日期: 2025-12-26 00:00:00-05:00
+
+================================================================================
+结论
+================================================================================
+
+项目代码返回的是tuple（两个Series）
+这是正确的，因为配置中ticker是列表
+
+[ERROR] 获取失败: 'gbk' codec can't encode character '\u2717' in position 2: illegal multibyte sequence

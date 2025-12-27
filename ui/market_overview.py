@@ -351,9 +351,9 @@ class MarketScoreTable(QWidget):
         
         # 表格
         self.table = QTableWidget()
-        self.table.setColumnCount(6)  # 移除灯色列，主要指标不显示灯色
+        self.table.setColumnCount(7)  # 添加数据日期列
         self.table.setHorizontalHeaderLabels([
-            "指标代码", "指标名称", "当前值", "Z分数", "评分", "权重(%)"
+            "指标代码", "指标名称", "数据日期", "当前值", "Z分数", "评分", "权重(%)"
         ])
         
         # 设置表格样式
@@ -391,9 +391,9 @@ class MarketScoreTable(QWidget):
         """
         更新评分表格
         
-        @param {List[Dict]} indicator_data - 指标数据列表
+        @param {List[Dict]} indicator_data - 指标数据列表，每个字典包含code, name, data_date, value, z, score
         @param {List[float]} weights - 权重列表
-        @param {Optional[date]} current_date - 当前日期
+        @param {Optional[date]} current_date - 当前日期（弃用，改用data_date）
         @param {str} market - 市场代码
         @param {str} style - 风格
         @param {Config} config - 配置对象
@@ -419,26 +419,40 @@ class MarketScoreTable(QWidget):
             name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(row, 1, name_item)
             
+            # 数据日期
+            data_date = ind_data.get('data_date', None)
+            if data_date:
+                # 如果是pandas Timestamp或datetime，格式化为字符串
+                if hasattr(data_date, 'strftime'):
+                    date_str = data_date.strftime('%Y-%m-%d')
+                else:
+                    date_str = str(data_date)
+            else:
+                date_str = "-"
+            date_item = QTableWidgetItem(date_str)
+            date_item.setFlags(date_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(row, 2, date_item)
+            
             # 当前值
             value = ind_data.get('value', None)
             value_str = f"{value:.2f}" if value is not None and not pd.isna(value) else "-"
             value_item = QTableWidgetItem(value_str)
             value_item.setFlags(value_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.table.setItem(row, 2, value_item)
+            self.table.setItem(row, 3, value_item)
             
             # Z分数
             z_score = ind_data.get('z', None)
             z_str = f"{z_score:.2f}" if z_score is not None and not pd.isna(z_score) else "-"
             z_item = QTableWidgetItem(z_str)
             z_item.setFlags(z_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.table.setItem(row, 3, z_item)
+            self.table.setItem(row, 4, z_item)
             
             # 评分（移除颜色背景）
             score = ind_data.get('score', None)
             score_str = f"{score:.1f}" if score is not None and not pd.isna(score) else "-"
             score_item = QTableWidgetItem(score_str)
             score_item.setFlags(score_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.table.setItem(row, 4, score_item)
+            self.table.setItem(row, 5, score_item)
             
             # 权重 - 使用SpinBox可编辑
             spinbox = QSpinBox()
@@ -447,7 +461,7 @@ class MarketScoreTable(QWidget):
             spinbox.setSuffix("%")
             spinbox.setAlignment(Qt.AlignmentFlag.AlignCenter)
             
-            self.table.setCellWidget(row, 5, spinbox)
+            self.table.setCellWidget(row, 6, spinbox)
             self.weight_spinboxes[code] = spinbox
     
     def _on_save_weights(self) -> None:
@@ -761,9 +775,9 @@ class CompositeScoreChart(QWidget):
             # 如果最近一年没有数据，使用全部数据
             filtered_scores = composite_scores
         
-        # 移除NaN和0值，这样周末的0分就不会显示
-        # 只保留有效的评分数据
-        valid_scores = filtered_scores[filtered_scores > 0]
+        # 移除NaN和0值（0分和NaN都是无效评分）
+        # 使用forward fill后，有效评分应该>0
+        valid_scores = filtered_scores[(filtered_scores.notna()) & (filtered_scores > 0)]
         
         if len(valid_scores) == 0:
             self.score_curve.clear()
@@ -838,8 +852,8 @@ class CompositeScoreChart(QWidget):
             # 如果最近一年没有数据，使用全部数据
             filtered_scores = score_series
         
-        # 移除NaN和0值
-        valid_scores = filtered_scores[filtered_scores > 0]
+        # 移除NaN值和0值（0分和NaN都是无效评分）
+        valid_scores = filtered_scores[(filtered_scores.notna()) & (filtered_scores > 0)]
         
         if len(valid_scores) == 0:
             self.score_curve.clear()
@@ -1791,20 +1805,64 @@ class MarketOverviewWidget(QWidget):
                     df = self.repository.load_series_data_by_code(code, view=view)
                     
                     if df is not None and not df.empty:
-                        latest = df.iloc[-1]
-                        latest_date = latest.name if latest_date is None else latest_date
+                        # 应用forward fill填充缺失数据（假期等情况）
+                        # 对value_tr, z, score列进行前向填充
+                        df_filled = df.copy()
+                        for col in ['value_tr', 'z', 'score']:
+                            if col in df_filled.columns:
+                                df_filled[col] = df_filled[col].ffill()
                         
-                        indicator_data.append({
-                            'code': code,
-                            'name': ind.get('name', code),
-                            'value': latest.get('value_tr', None),
-                            'z': latest.get('z', None),
-                            'score': latest.get('score', None)
-                        })
+                        # 移除评分为0或NaN的行（0分无效，NaN也无效）
+                        valid_df = df_filled[
+                            (df_filled['score'].notna()) & 
+                            (df_filled['score'] > 0)
+                        ]
+                        
+                        if not valid_df.empty:
+                            # 使用最后一条有效评分的记录
+                            latest = valid_df.iloc[-1]
+                            data_date = latest.name
+                            latest_date = data_date if latest_date is None else latest_date
+                            
+                            indicator_data.append({
+                                'code': code,
+                                'name': ind.get('name', code),
+                                'data_date': data_date,
+                                'value': latest.get('value_tr', latest.get('value_raw', None)),
+                                'z': latest.get('z', None),
+                                'score': latest.get('score', None)
+                            })
+                        else:
+                            # 没有有效评分，尝试查找value_tr
+                            df_with_tr = df_filled[df_filled['value_tr'].notna()]
+                            if not df_with_tr.empty:
+                                latest = df_with_tr.iloc[-1]
+                                data_date = latest.name
+                                latest_date = data_date if latest_date is None else latest_date
+                                
+                                indicator_data.append({
+                                    'code': code,
+                                    'name': ind.get('name', code),
+                                    'data_date': data_date,
+                                    'value': latest.get('value_tr', latest.get('value_raw', None)),
+                                    'z': latest.get('z', None),
+                                    'score': None  # 明确标记无评分
+                                })
+                            else:
+                                # 完全没有数据
+                                indicator_data.append({
+                                    'code': code,
+                                    'name': ind.get('name', code),
+                                    'data_date': None,
+                                    'value': None,
+                                    'z': None,
+                                    'score': None
+                                })
                     else:
                         indicator_data.append({
                             'code': code,
                             'name': ind.get('name', code),
+                            'data_date': None,
                             'value': None,
                             'z': None,
                             'score': None
@@ -1814,6 +1872,7 @@ class MarketOverviewWidget(QWidget):
                     indicator_data.append({
                         'code': code,
                         'name': ind.get('name', code),
+                        'data_date': None,
                         'value': None,
                         'z': None,
                         'score': None

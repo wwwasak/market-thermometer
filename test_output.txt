@@ -1,0 +1,38 @@
+﻿python : Traceback (most recent call last):
+所在位置 C:\Users\59546\AppData\Local\Temp\ps-script-3d463f94-7ed3-41fb-a519-6040ab212ffe.ps1:93 字符: 1
++ python test_full_flow.py 2>&1 | Out-File -Encoding UTF8 test_output.t ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "D:\code\MyCode\market-thermometer\test_full_flow.py", line 125, in <module>
+    test_full_flow()
+    ~~~~~~~~~~~~~~^^
+  File "D:\code\MyCode\market-thermometer\test_full_flow.py", line 20, in test_full_flow
+    pipeline = MarketPipeline('US', repo)
+  File "D:\code\MyCode\market-thermometer\core\pipeline.py", line 63, in __init__
+    self.repository = Repository(database_url)
+                      ~~~~~~~~~~^^^^^^^^^^^^^^
+  File "D:\code\MyCode\market-thermometer\storage\repository.py", line 36, in __init__
+    self.engine = create_engine(database_url, echo=False)
+                  ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<string>", line 2, in create_engine
+  File "C:\Users\59546\AppData\Roaming\Python\Python313\site-packages\sqlalchemy\util\deprecations.py", line 281, in wa
+rned
+    return fn(*args, **kwargs)  # type: ignore[no-any-return]
+  File "C:\Users\59546\AppData\Roaming\Python\Python313\site-packages\sqlalchemy\engine\create.py", line 564, in create
+_engine
+    u = _url.make_url(url)
+  File "C:\Users\59546\AppData\Roaming\Python\Python313\site-packages\sqlalchemy\engine\url.py", line 860, in make_url
+    raise exc.ArgumentError(
+        f"Expected string or URL object, got {name_or_url!r}"
+    )
+sqlalchemy.exc.ArgumentError: Expected string or URL object, got <storage.repository.Repository object at 0x000001BB531
+22CF0>
+================================================================================
+完整流程测试
+================================================================================
+时间: 2025-12-27 18:55:06
+
+
+[ERROR] 测试失败: Expected string or URL object, got <storage.repository.Repository object at 0x000001BB53122CF0>

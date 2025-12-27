@@ -1,0 +1,54 @@
+﻿python : D:\code\MyCode\market-thermometer\simple_check.py:20: FutureWarning: YF.download() has changed argument auto_a
+djust default to True
+所在位置 C:\Users\59546\AppData\Local\Temp\ps-script-adad5ebf-39bc-4b41-8d28-4ec4ac262c0b.ps1:92 字符: 1
++ python simple_check.py 2>&1 | Out-File -Encoding UTF8 simple_output.t ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (D:\code\MyCode\...default to True:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  iwm = yf.download("IWM", start=start, end=end, progress=False)
+D:\code\MyCode\market-thermometer\simple_check.py:21: FutureWarning: YF.download() has changed argument auto_adjust def
+ault to True
+  spy = yf.download("SPY", start=start, end=end, progress=False)
+================================================================================
+检查1: yfinance当前数据
+================================================================================
+
+IWM: 4 条, 最新: 2025-12-26
+SPY: 4 条, 最新: 2025-12-26
+
+yfinance有12月26日数据: True
+
+================================================================================
+检查2: 数据库中IWM_SPY_REL20的情况
+================================================================================
+
+数据库中12月20日之后的记录:
+         date  value_raw  value_tr
+0  2025-12-26        NaN       NaN
+1  2025-12-24   0.008386  0.008386
+2  2025-12-23   0.021806  0.021806
+3  2025-12-22   0.036179  0.036179
+
+数据库有12月26日记录: True
+12月26日value_raw是NaN: True
+
+================================================================================
+检查3: 最近的获取日志
+================================================================================
+
+最近的日志:
+[2025-12-27 18:47:46.348184] save_raw_data: Saved 178 raw data records for US daily
+[2025-12-27 18:47:45.600183] fetch_all: Fetched 9/9 indicators for US
+[2025-12-27 18:47:38.235747] save_raw_data: Saved 189 raw data records for CN daily
+[2025-12-27 18:47:37.578086] fetch_all: Fetched 8/9 indicators for CN
+[2025-12-27 18:03:51.129281] save_raw_data: Saved 3188 raw data records for US daily
+
+================================================================================
+结论
+================================================================================
+Traceback (most recent call last):
+  File "D:\code\MyCode\market-thermometer\simple_check.py", line 83, in <module>
+    print("\n\u2713 yfinance有12月26日数据")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'gbk' codec can't encode character '\u2713' in position 2: illegal multibyte sequence

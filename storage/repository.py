@@ -315,6 +315,78 @@ class Repository:
             return self.load_series_data(meta['id'], view, start_date, end_date)
         return pd.DataFrame()
     
+    def load_raw_series_by_code(
+        self,
+        code: str,
+        view: str = 'daily',
+        limit_days: Optional[int] = None
+    ) -> Optional[pd.Series]:
+        """
+        从数据库加载指定code的历史原始数据
+        
+        用于增量更新时补充历史数据以计算转换
+        
+        @param {str} code - 指标代码
+        @param {str} view - 视图类型（'daily'或'weekly'）
+        @param {Optional[int]} limit_days - 限制最近N天（None=全部历史）
+        @returns {Optional[pd.Series]} 原始数据序列，index为日期，value为value_raw
+        
+        @example
+        >>> repo = Repository()
+        >>> # 加载IWM_SPY_REL20最近30天的原始数据
+        >>> series = repo.load_raw_series_by_code('IWM_SPY_REL20', limit_days=30)
+        """
+        from datetime import timedelta
+        
+        session = self.get_session()
+        try:
+            # 获取series_meta
+            meta = session.query(SeriesMeta).filter(SeriesMeta.code == code).first()
+            
+            if not meta:
+                return None
+            
+            series_id = meta.id
+            
+            # 构建查询
+            query = session.query(SeriesData).filter(
+                and_(
+                    SeriesData.series_id == series_id,
+                    SeriesData.view == view
+                )
+            )
+            
+            # 如果限制天数，添加日期过滤
+            if limit_days:
+                cutoff_date = datetime.now().date() - timedelta(days=limit_days)
+                query = query.filter(SeriesData.date >= cutoff_date)
+            
+            query = query.order_by(SeriesData.date)
+            
+            data_list = query.all()
+            
+            if not data_list:
+                return None
+            
+            # 转换为Series
+            dates = []
+            values = []
+            
+            for d in data_list:
+                dates.append(pd.Timestamp(d.date))
+                values.append(d.value_raw)
+            
+            series = pd.Series(values, index=dates)
+            series.index.name = 'date'
+            
+            return series
+            
+        except Exception as e:
+            print(f"[ERROR] 加载{code}历史数据失败: {e}")
+            return None
+        finally:
+            session.close()
+    
     # ==================== Regime 操作 ====================
     
     def upsert_regime(

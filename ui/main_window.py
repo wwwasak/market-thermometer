@@ -73,11 +73,11 @@ class ManualFetchWorker(QThread):
             result: Dict[str, Dict] = {}
             for market in self.markets:
                 pipeline = MarketPipeline(market=market, database_url=self.database_url)
-                # 只获取原始数据，不计算评分
+                # 只获取原始数据，不计算评分（启用增量模式以加载历史数据辅助转换）
                 result[market] = pipeline.fetch_and_save_raw_data(
                     start_date=self.start_date,
                     end_date=self.end_date,
-                    incremental=True,
+                    incremental=True  # 明确标记为增量模式
                 )
             self.completed.emit(result)
         except Exception as exc:  # pragma: no cover
@@ -245,7 +245,7 @@ class ThermometerMainWindow(QMainWindow):
 
     MANUAL_FETCH_DAYS = 7
     MANUAL_FETCH_BUFFER = 5
-    MIN_MANUAL_FETCH_DAYS = 30
+    MIN_MANUAL_FETCH_DAYS = 50  # 确保有足够历史数据计算relret20（需要至少35天）
 
     def __init__(
         self,

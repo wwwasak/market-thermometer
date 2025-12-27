@@ -269,7 +269,7 @@ class MarketPipeline:
             # 增量模式：从最后一次更新开始
             last_date = self._get_last_data_date()
             if last_date:
-                start_date = last_date - timedelta(days=5)  # 重叠5天确保数据完整
+                start_date = last_date - timedelta(days=35)  # 重叠35天，确保有足够历史数据计算转换（如relret20需要20个交易日）
                 print(f"[INFO] 增量更新模式，从 {start_date.strftime('%Y-%m-%d')} 开始")
         
         if not start_date:
@@ -341,17 +341,86 @@ class MarketPipeline:
         
         return results
     
+    def _get_required_history_window(self, transform_type: str) -> int:
+        """
+        获取转换类型需要的最小历史窗口天数
+        
+        @param {str} transform_type - 转换类型
+        @returns {int} 需要的天数
+        """
+        window_map = {
+            'raw': 0,
+            'pct20': 25,  # 20天 + 5天缓冲
+            'delta20': 25,
+            'delta20_ffill': 30,
+            'relret20': 25,
+            'slope_20_60_ewma': 70,  # 60天 + 10天缓冲
+            'log_winsor': 90,
+            'raw_winsor': 90,
+            'yoy_std_ffill': 400,  # 12个月 + 缓冲
+        }
+        return window_map.get(transform_type, 30)
+    
+    def _merge_db_history_if_needed(
+        self,
+        code: str,
+        new_series: pd.Series,
+        transform_type: str,
+        view_type: str = 'daily'
+    ) -> pd.Series:
+        """
+        如果新数据不足以计算转换，从数据库加载历史数据合并
+        
+        @param {str} code - 指标代码
+        @param {pd.Series} new_series - 新获取的数据
+        @param {str} transform_type - 转换类型
+        @param {str} view_type - 视图类型
+        @returns {pd.Series} 合并后的完整数据（用于计算转换）
+        """
+        required_window = self._get_required_history_window(transform_type)
+        
+        # 如果不需要历史窗口或数据已足够，直接返回
+        if required_window == 0 or len(new_series) >= required_window:
+            return new_series
+        
+        # 从数据库加载历史数据
+        print(f"[INFO] {code}: 内存数据不足({len(new_series)}天<{required_window}天)，从数据库加载历史")
+        
+        db_series = self.repository.load_raw_series_by_code(
+            code,
+            view=view_type,
+            limit_days=required_window + 10  # 额外10天缓冲
+        )
+        
+        if db_series is None or db_series.empty:
+            print(f"[WARN] {code}: 数据库无历史数据，可能导致转换计算失败")
+            return new_series
+        
+        # 合并数据库历史和新数据
+        combined = pd.concat([db_series, new_series])
+        combined = combined.sort_index()
+        # 去重，保留最新的值（新数据优先）
+        combined = combined[~combined.index.duplicated(keep='last')]
+        
+        print(f"[OK] {code}: 合并后共{len(combined)}条数据（数据库{len(db_series)}+新增{len(new_series)}）")
+        
+        return combined
+    
     def transform_data(
         self,
-        raw_data: Dict[str, pd.Series]
+        raw_data: Dict[str, pd.Series],
+        incremental: bool = False,
+        view_type: str = 'daily'
     ) -> Dict[str, pd.Series]:
         """
         应用数据转换
         
         @param {Dict[str, pd.Series]} raw_data - 原始数据
+        @param {bool} incremental - 是否为增量模式（True时会从数据库加载历史数据辅助计算）
+        @param {str} view_type - 视图类型
         @returns {Dict[str, pd.Series]} 转换后的数据
         """
-        print(f"\n[INFO] 应用数据转换...")
+        print(f"\n[INFO] 应用数据转换...（增量模式：{incremental}）")
         
         transformed: Dict[str, pd.Series] = {}
         
@@ -374,9 +443,67 @@ class MarketPipeline:
                 # 需要将tuple中的每个series转换为naive
                 series = tuple(self._ensure_naive_series(s) for s in data_obj)
                 print(f"[INFO] {code} 是多ticker指标，包含 {len(series)} 个series")
+                
+                # 对于relret20类型的多ticker指标
+                # 在增量模式下，应该先计算新数据的relret20，然后从数据库加载历史进行合并
+                # 因为数据库中存储的是计算后的relret20值，而不是原始ticker价格
+                if incremental and transform == 'relret20':
+                    # 先用新获取的多ticker数据计算relret20
+                    try:
+                        temp_relret = apply_transform(series, transform)
+                        print(f"[INFO] {code}: 新数据计算得到{len(temp_relret)}个relret20值")
+                        
+                        # 从数据库加载该指标的历史relret20值
+                        print(f"[INFO] {code}: 从数据库加载完整历史relret20数据")
+                        db_relret = self.repository.load_raw_series_by_code(
+                            code,
+                            view=view_type,
+                            limit_days=None  # 加载所有历史
+                        )
+                        
+                        if db_relret is not None and not db_relret.empty:
+                            # 合并历史和新计算的值（用于后续可能需要完整历史的场景）
+                            combined = pd.concat([db_relret, temp_relret])
+                            combined = combined.sort_index()
+                            combined = combined[~combined.index.duplicated(keep='last')]
+                            print(f"[OK] {code}: 使用{len(combined)}条数据（数据库{len(db_relret)}+新增{len(temp_relret)}）")
+                            # series设置为combined用于后续处理
+                            series = combined
+                        else:
+                            print(f"[WARN] {code}: 数据库无历史数据，使用新计算的值")
+                            series = temp_relret
+                        
+                        # 重要：extra_value_tr应该只包含新计算的值，用于保存
+                        extra_value_tr = temp_relret
+                    except Exception as e:
+                        print(f"[ERROR] {code}: 增量模式relret20处理失败: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        # 出错时按原逻辑处理
+                    
             else:
                 # 单个Series
                 series = self._ensure_naive_series(data_obj)
+                
+                # 如果是增量模式，直接从数据库加载完整历史数据用于转换计算
+                if incremental and transform != 'raw':
+                    print(f"[INFO] {code}: 增量模式，从数据库加载完整历史数据用于转换计算")
+                    db_series = self.repository.load_raw_series_by_code(
+                        code,
+                        view=view_type,
+                        limit_days=None  # None = 加载所有历史数据
+                    )
+                    
+                    if db_series is not None and not db_series.empty:
+                        # 合并数据库历史和新获取的数据
+                        combined = pd.concat([db_series, series])
+                        combined = combined.sort_index()
+                        # 去重，保留最新的值（新数据优先）
+                        combined = combined[~combined.index.duplicated(keep='last')]
+                        print(f"[OK] {code}: 使用{len(combined)}条历史数据计算转换（数据库{len(db_series)}+新增{len(series)}）")
+                        series = combined
+                    else:
+                        print(f"[WARN] {code}: 数据库无历史数据，使用新数据计算（可能不足）")
             
             try:
                 if extra_value_tr is not None:
@@ -390,6 +517,20 @@ class MarketPipeline:
                 else:
                     transformed_series = apply_transform(series, transform)
                     print(f"[TRANSFORM] {code}: {transform}")
+                
+                # 如果是增量模式，只保留新获取日期的转换结果
+                if incremental:
+                    # 确定新数据的日期范围
+                    if isinstance(data_obj, (pd.Series, pd.DataFrame)):
+                        new_dates = data_obj.index if isinstance(data_obj, pd.Series) else data_obj.index
+                        transformed_series = transformed_series.reindex(new_dates)
+                        print(f"[INFO] {code}: 增量模式，只保留{len(new_dates)}个新日期的转换结果")
+                    elif isinstance(data_obj, tuple) and extra_value_tr is not None:
+                        # 对于relret20等多ticker指标，extra_value_tr就是我们计算的结果
+                        # 它已经是只包含新日期的，不需要再reindex
+                        # 但transformed_series可能是完整历史，需要替换
+                        transformed_series = extra_value_tr
+                        print(f"[INFO] {code}: 增量模式（多ticker），使用计算的{len(transformed_series)}个新值")
 
                 transformed[code] = self._ensure_naive_series(transformed_series)
             
@@ -675,13 +816,14 @@ class MarketPipeline:
         if view_type == 'weekly':
             print("[INFO] 重采样到周度...")
             df = df.resample('W-FRI').last()
-            # 也需要重采样Z分数和评分（重采样后的数据已经是交易日）
-            z_dict = {code: z.reindex(all_dates).resample('W-FRI').last() for code, z in z_dict.items()}
-            score_dict = {code: score.reindex(all_dates).resample('W-FRI').last() for code, score in score_dict.items()}
+            # 重采样Z分数和评分，使用ffill填充缺失周
+            z_dict = {code: z.reindex(all_dates, method='ffill').resample('W-FRI').last() for code, z in z_dict.items()}
+            score_dict = {code: score.reindex(all_dates, method='ffill').resample('W-FRI').last() for code, score in score_dict.items()}
         else:
             # 对于日度视图，需要将z_dict和score_dict也重新索引到交易日
-            z_dict = {code: z.reindex(all_dates) for code, z in z_dict.items()}
-            score_dict = {code: score.reindex(all_dates) for code, score in score_dict.items()}
+            # 使用ffill填充缺失数据（假期、数据延迟等情况）
+            z_dict = {code: z.reindex(all_dates, method='ffill') for code, z in z_dict.items()}
+            score_dict = {code: score.reindex(all_dates, method='ffill') for code, score in score_dict.items()}
         
         # 合并z-score和score到DataFrame
         result_data = {}
@@ -1565,8 +1707,8 @@ class MarketPipeline:
             if not raw_data:
                 raise PipelineError("No data fetched")
             
-            # 2. 转换数据
-            transformed_data = self.transform_data(raw_data)
+            # 2. 转换数据（传递incremental参数以启用历史数据补充）
+            transformed_data = self.transform_data(raw_data, incremental=incremental, view_type='daily')
             
             # 2.5 计算派生指标
             raw_data, transformed_data = self.calculate_derived_indicators(
