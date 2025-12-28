@@ -1105,12 +1105,28 @@ class MarketPipeline:
             else:
                 main_lamps[code] = lamp_series
 
+        # 跨市场查询软确认指标（如果本市场没有）
         confirm_config = self.market_config.get('confirm_layer', {}) or {}
+        soft_confirm_codes = confirm_config.get('soft_confirm_codes', [])
+        
+        for code in soft_confirm_codes:
+            # 如果本市场没有这个指标，尝试从另一个市场加载
+            if code not in observer_lamps and code not in pair_lamps:
+                print(f"[INFO] 软确认指标 {code} 不在当前市场，尝试跨市场查询...")
+                cross_market_lamp = self._load_cross_market_lamp(code, scores.index, view_type)
+                if cross_market_lamp is not None:
+                    # 判断是配对还是单个指标
+                    if isinstance(cross_market_lamp, tuple):
+                        pair_lamps[code] = cross_market_lamp
+                        print(f"[OK] 从其他市场加载配对 {code}")
+                    else:
+                        observer_lamps[code] = cross_market_lamp
+                        print(f"[OK] 从其他市场加载指标 {code}")
 
         config_params = {
             'hard_veto_codes': confirm_config.get('hard_veto_codes', []),
             'hard_veto_persistence': confirm_config.get('hard_veto_persistence', 3 if view_type == 'daily' else 0),
-            'soft_confirm_codes': confirm_config.get('soft_confirm_codes', []),
+            'soft_confirm_codes': soft_confirm_codes,
             'soft_confirm_weights': confirm_config.get('soft_confirm_weights', {}),
             'soft_confirm_green': confirm_config.get('soft_confirm_green', 1.6),
             'soft_confirm_red': confirm_config.get('soft_confirm_red', 0.8),
@@ -1137,6 +1153,57 @@ class MarketPipeline:
         except Exception as e:
             print(f"[ERROR] 确认层失败: {e}")
             return {}
+    
+    def _load_cross_market_lamp(
+        self,
+        code: str,
+        date_index: pd.DatetimeIndex,
+        view_type: str = 'daily'
+    ) -> Optional[pd.Series]:
+        """
+        从其他市场加载软确认指标的灯号
+        
+        @param {str} code - 指标代码
+        @param {pd.DatetimeIndex} date_index - 目标日期索引
+        @param {str} view_type - 视图类型
+        @returns {Optional[pd.Series]} 灯号序列，或None
+        """
+        try:
+            # 查询数据库中该指标的market
+            meta = self.repository.session.query(SeriesMeta).filter_by(code=code).first()
+            if not meta:
+                print(f"[WARN] 指标 {code} 不存在于任何市场")
+                return None
+            
+            other_market = meta.market
+            if other_market == self.market:
+                return None  # 就在当前市场，不需要跨市场
+            
+            print(f"[INFO] 指标 {code} 位于 {other_market} 市场")
+            
+            # 从数据库加载该指标的评分数据
+            series_data = self.repository.load_series_data(code, view=view_type)
+            if series_data.empty or 'score' not in series_data.columns:
+                print(f"[WARN] 指标 {code} 无评分数据")
+                return None
+            
+            score_series = series_data['score'].dropna()
+            if score_series.empty:
+                return None
+            
+            # 转换为灯号
+            green_th = self.config.get(f'markets.{other_market}.green_threshold', 60)
+            red_th = self.config.get(f'markets.{other_market}.red_threshold', 40)
+            lamp_series = lamp_from_score(score_series, green_th, red_th)
+            
+            # 对齐到目标日期索引（使用ffill）
+            lamp_series = lamp_series.reindex(date_index, method='ffill')
+            
+            return lamp_series
+            
+        except Exception as e:
+            print(f"[ERROR] 跨市场加载指标 {code} 失败: {e}")
+            return None
     
     def _get_reference_trading_days(
         self,
