@@ -1938,19 +1938,32 @@ class MarketOverviewWidget(QWidget):
                 role = obs.get('role', '')
                 
                 try:
-                    # 从lamp_history表获取最新灯色
-                    lamp_hist = self.repository.load_lamp_history(
-                        market=market,
-                        view=view,
-                        source_code=code
-                    )
+                    # 直接从series_data获取最新score并计算灯色
+                    series_data_df = self.repository.load_series_data_by_code(code, view=view)
                     
-                    if lamp_hist is not None and not lamp_hist.empty:
-                        latest_lamp = lamp_hist.iloc[-1]['lamp']
+                    if series_data_df is not None and not series_data_df.empty and 'score' in series_data_df.columns:
+                        # 获取最新的非NaN score
+                        score_series = series_data_df['score'].dropna()
+                        if not score_series.empty:
+                            latest_score = score_series.iloc[-1]
+                            
+                            # 根据score计算灯色
+                            green_th = self.config.get(f'markets.{market}.green_threshold', 60)
+                            red_th = self.config.get(f'markets.{market}.red_threshold', 40)
+                            
+                            if latest_score >= green_th:
+                                latest_lamp = 'G'
+                            elif latest_score <= red_th:
+                                latest_lamp = 'R'
+                            else:
+                                latest_lamp = 'Y'
+                        else:
+                            latest_lamp = '-'
                     else:
                         latest_lamp = '-'
+                        
                 except Exception as e:
-                    print(f"[WARN] 加载观察者{code}灯色失败: {e}")
+                    print(f"[WARN] 加载观察者{code}评分失败: {e}")
                     latest_lamp = '-'
                 
                 observer_data.append({
