@@ -727,17 +727,24 @@ class AKShareFetcher:
     
     def _fetch_etf_flow(self, start_date: str, end_date: str) -> pd.Series:
         """
-        获取代表性宽基ETF的5日净申赎近似值
+        获取A500 ETF的5日净申赎近似值（基于成交额）
         
-        通过东方财富个股资金流向接口抓取多只宽基ETF的“主力净流入”（万元），
-        汇总后转换为亿元，最后计算5日滚动和，近似代表净申赎额。
+        逻辑：
+        1. 成交额 = 成交量 × 平均价格
+        2. 成交额大 → 说明有大量资金参与交易
+        3. 结合涨跌幅：涨且成交额大 → 资金流入；跌且成交额大 → 资金流出
+        4. 计算：成交额 × sign(涨跌幅) = 带方向的资金流
+        5. 计算5日滚动和
         
-        @returns {pd.Series} 宽基ETF 5日滚动净申赎（亿元）
+        @returns {pd.Series} A500 ETF 5日滚动净申赎（亿元）
         """
-        etf_candidates = [
-            {"symbol": "510300", "market": "sh", "label": "沪深300ETF"},
-            {"symbol": "510500", "market": "sh", "label": "中证500ETF"},
-            {"symbol": "159915", "market": "sz", "label": "创业板ETF"}
+        # A500相关ETF列表
+        a500_etf_list = [
+            {"code": "159352", "name": "南方中证A500ETF", "weight": 0.50},  # 规模最大
+            {"code": "563080", "name": "华夏中证A500ETF", "weight": 0.15},
+            {"code": "563050", "name": "易方达中证A500ETF", "weight": 0.15},
+            {"code": "563060", "name": "嘉实中证A500ETF", "weight": 0.10},
+            {"code": "159353", "name": "华泰柏瑞中证A500ETF", "weight": 0.10}
         ]
         
         start_dt = pd.to_datetime(start_date)
@@ -745,74 +752,72 @@ class AKShareFetcher:
         
         combined_flow = None
         fetch_errors = []
+        success_count = 0
         
-        for meta in etf_candidates:
+        print(f"[INFO] Fetching A500 ETF flows ({len(a500_etf_list)} ETFs)...")
+        
+        for etf_meta in a500_etf_list:
+            code = etf_meta['code']
+            name = etf_meta['name']
+            weight = etf_meta['weight']
+            
             try:
-                df_flow = self.ak.stock_individual_fund_flow(
-                    stock=meta["symbol"],
-                    market=meta["market"]
+                # 获取ETF历史行情
+                df = self.ak.fund_etf_hist_em(symbol=code, period="daily", adjust="")
+                
+                if df is None or df.empty:
+                    fetch_errors.append(f"{name}: no data")
+                    continue
+                
+                # 处理日期
+                df['date'] = pd.to_datetime(df['日期'], errors='coerce')
+                df = df.dropna(subset=['date'])
+                df = df.set_index('date').sort_index()
+                
+                # 日期过滤
+                df = df[(df.index >= start_dt) & (df.index <= end_dt)]
+                
+                if df.empty:
+                    fetch_errors.append(f"{name}: no data in date range")
+                    continue
+                
+                # 计算带方向的成交额
+                # 成交额（元） × sign(涨跌幅) → 表示资金流向
+                turnover = pd.to_numeric(df['成交额'], errors='coerce')  # 单位：元
+                pct_change = pd.to_numeric(df['涨跌幅'], errors='coerce') / 100.0  # 百分比转小数
+                
+                # 带方向成交额 = 成交额 × sign(涨跌幅)
+                directional_flow = turnover * pct_change.apply(
+                    lambda x: 1 if x > 0 else -1 if x < 0 else 0
                 )
-            except Exception as fetch_err:
-                fetch_errors.append(f"{meta['symbol']}: {fetch_err}")
+                
+                # 元 -> 亿元，并应用权重
+                directional_flow = (directional_flow / 1e8) * weight
+                directional_flow = directional_flow.dropna()
+                
+                if combined_flow is None:
+                    combined_flow = directional_flow
+                else:
+                    combined_flow = combined_flow.add(directional_flow, fill_value=0.0)
+                
+                success_count += 1
+                print(f"[OK] Fetched {len(directional_flow)} records for {name} (weight: {weight})")
+                
+            except Exception as e:
+                fetch_errors.append(f"{name}: {str(e)}")
+                print(f"[WARN] Failed to fetch {name}: {e}")
                 continue
-            
-            if df_flow is None or df_flow.empty:
-                fetch_errors.append(f"{meta['symbol']}: empty data")
-                continue
-            
-            flow_col = None
-            date_col = None
-            for col in df_flow.columns:
-                if '日期' in col:
-                    date_col = col
-                    break
-            if date_col is None:
-                date_col = df_flow.columns[0]
-            
-            flow_candidates = [col for col in df_flow.columns if '主力净流入' in col]
-            for col in flow_candidates:
-                if '净额' in col:
-                    flow_col = col
-                    break
-            if flow_col is None and flow_candidates:
-                flow_col = flow_candidates[0]
-            
-            if flow_col is None:
-                fetch_errors.append(f"{meta['symbol']}: missing 主力净流入 column")
-                continue
-            
-            df_flow['date'] = pd.to_datetime(df_flow[date_col])
-            df_flow = df_flow.set_index('date').sort_index()
-            df_flow = df_flow[(df_flow.index >= start_dt) & (df_flow.index <= end_dt)]
-            
-            if df_flow.empty:
-                fetch_errors.append(f"{meta['symbol']}: no rows within range")
-                continue
-            
-            series = pd.to_numeric(df_flow[flow_col], errors='coerce').dropna()
-            if series.empty:
-                fetch_errors.append(f"{meta['symbol']}: 主力净流入 empty after cleaning")
-                continue
-            
-            # 万元 -> 亿元
-            series = series / 10000.0
-            
-            if combined_flow is None:
-                combined_flow = series
-            else:
-                combined_flow = combined_flow.add(series, fill_value=0.0)
-            
-            print(f"[OK] Fetched {len(series)} records for ETF flow ({meta['label']})")
         
         if combined_flow is None or combined_flow.empty:
             error_msg = "; ".join(fetch_errors) if fetch_errors else "unknown reason"
-            raise DataFetchError(f"Failed to fetch ETF flow data: {error_msg}")
+            raise DataFetchError(f"Failed to fetch A500 ETF flow data: {error_msg}")
         
+        # 计算5日滚动和
         combined_flow = combined_flow.sort_index()
         rolling_flow = combined_flow.rolling(window=5, min_periods=1).sum()
         rolling_flow = rolling_flow[(rolling_flow.index >= start_dt) & (rolling_flow.index <= end_dt)]
         
-        print(f"[OK] Aggregated ETF flow into 5D rolling series with {len(rolling_flow)} records")
+        print(f"[OK] Aggregated {success_count}/{len(a500_etf_list)} A500 ETFs into 5D rolling series with {len(rolling_flow)} records")
         return rolling_flow
 
 

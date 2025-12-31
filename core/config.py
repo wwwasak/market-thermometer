@@ -256,7 +256,8 @@ class Config:
                             "direction": "up_good",
                             "transform": "raw",
                             "source": "akshare",
-                            "symbol": "etf_flow"
+                            "symbol": "etf_flow",
+                            "note": "基于5只A500 ETF的带方向成交额计算（成交额×sign(涨跌幅)），5日滚动和"
                         },
                         {
                             "code": "CNY",
