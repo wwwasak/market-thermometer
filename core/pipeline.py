@@ -1343,8 +1343,10 @@ class MarketPipeline:
             # 对低频指标，填充到所有交易日
             is_low_freq = self._is_low_frequency_indicator(code)
             if is_low_freq and len(reference_trading_days) > 0:
+                # 扩展参考交易日以包含转换后数据的所有日期（避免新日期丢失）
+                all_trading_days = reference_trading_days.union(trans_series.index).sort_values()
                 # 使用前向填充扩展到所有交易日
-                trans_series = trans_series.reindex(reference_trading_days, method='ffill')
+                trans_series = trans_series.reindex(all_trading_days, method='ffill')
                 print(f"[INFO] {code} 是低频指标，已填充到 {len(trans_series)} 个交易日")
             
             target_index = trans_series.index
@@ -1353,9 +1355,9 @@ class MarketPipeline:
                 if 'value_raw' not in raw_obj.columns:
                     continue
                 raw_series = self._ensure_naive_series(raw_obj['value_raw'])
-                # 对低频指标，先前向填充再对齐
-                if is_low_freq and len(reference_trading_days) > 0:
-                    raw_series = raw_series.reindex(reference_trading_days, method='ffill')
+                # 对低频指标，先前向填充再对齐（使用target_index以包含所有日期）
+                if is_low_freq:
+                    raw_series = raw_series.reindex(target_index, method='ffill')
                 raw_series = self._align_raw_series(raw_series, target_index)
                 if 'value_tr' in raw_obj.columns:
                     extra_value_tr_series = self._ensure_naive_series(raw_obj['value_tr']).reindex(target_index)
@@ -1366,9 +1368,9 @@ class MarketPipeline:
                 print(f"[INFO] {code} 是多ticker指标，使用转换后的值作为原始值")
             elif isinstance(raw_obj, pd.Series):
                 raw_series = self._ensure_naive_series(raw_obj)
-                # 对低频指标，先前向填充再对齐
-                if is_low_freq and len(reference_trading_days) > 0:
-                    raw_series = raw_series.reindex(reference_trading_days, method='ffill')
+                # 对低频指标，先前向填充再对齐（使用target_index以包含所有日期）
+                if is_low_freq:
+                    raw_series = raw_series.reindex(target_index, method='ffill')
                 raw_series = self._align_raw_series(raw_series, target_index)
             else:
                 raw_series = pd.Series(index=target_index, dtype=float)
