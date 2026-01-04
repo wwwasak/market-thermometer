@@ -1343,11 +1343,27 @@ class MarketPipeline:
             # 对低频指标，填充到所有交易日
             is_low_freq = self._is_low_frequency_indicator(code)
             if is_low_freq and len(reference_trading_days) > 0:
-                # 扩展参考交易日以包含转换后数据的所有日期（避免新日期丢失）
-                all_trading_days = reference_trading_days.union(trans_series.index).sort_values()
-                # 使用前向填充扩展到所有交易日
-                trans_series = trans_series.reindex(all_trading_days, method='ffill')
-                print(f"[INFO] {code} 是低频指标，已填充到 {len(trans_series)} 个交易日")
+                # 获取指标的转换类型
+                indicator = self.indicator_lookup.get(code, {})
+                transform_type = indicator.get('transform', '')
+                
+                # 对于月度指标（如PMI），不要填充到未来月份
+                if 'yoy_std_ffill' in transform_type or 'monthly' in transform_type.lower():
+                    # 月度指标：只填充到数据最后一个月的月末
+                    if len(trans_series) > 0:
+                        last_data_date = trans_series.index.max()
+                        # 只使用不晚于数据月份的参考交易日
+                        last_month_end = pd.Timestamp(last_data_date.year, last_data_date.month, 
+                                                     pd.Period(last_data_date, freq='M').days_in_month)
+                        valid_trading_days = reference_trading_days[reference_trading_days <= last_month_end]
+                        all_trading_days = valid_trading_days.union(trans_series.index).sort_values()
+                        trans_series = trans_series.reindex(all_trading_days, method='ffill')
+                        print(f"[INFO] {code} 是月度指标，已填充到 {last_data_date.strftime('%Y-%m')} 月末的 {len(trans_series)} 个交易日")
+                else:
+                    # 其他低频指标（如RRP/TGA）：可以填充到所有交易日
+                    all_trading_days = reference_trading_days.union(trans_series.index).sort_values()
+                    trans_series = trans_series.reindex(all_trading_days, method='ffill')
+                    print(f"[INFO] {code} 是低频指标，已填充到 {len(trans_series)} 个交易日")
             
             target_index = trans_series.index
             

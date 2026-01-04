@@ -602,6 +602,12 @@ class AKShareFetcher:
             df = df.set_index('date')
             df = df.sort_index()
             
+            # 过滤掉当月数据（PMI在下月初发布，当月数据可能是前向填充的旧值）
+            # 例如：1月获取数据时，只取到12月，避免把12月PMI错误地标注为1月
+            from datetime import datetime as dt
+            current_month_start = dt.now().replace(day=1)
+            df = df[df.index < pd.Timestamp(current_month_start)]
+            
             # 过滤日期范围
             start_dt = pd.to_datetime(start_date)
             end_dt = pd.to_datetime(end_date)
@@ -610,7 +616,7 @@ class AKShareFetcher:
             # 使用制造业PMI指数（包含新订单信息）
             series = df['制造业-指数'].astype(float)
             
-            print(f"[OK] Fetched {len(series)} records for PMI manufacturing")
+            print(f"[OK] Fetched {len(series)} records for PMI manufacturing (filtered current month)")
             return series
             
         except Exception as e:
