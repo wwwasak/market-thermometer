@@ -1046,9 +1046,9 @@ class MarketPipeline:
             print(f"[WARN] {len(missing_indicators)}/{len(main_indicators)} 个主指标缺少 {target_date.date()} 的数据:")
             for ind in missing_indicators:
                 if ind['has_data']:
-                    print(f"  • {ind['code']} ({ind['name']}): 最新数据为 {ind['latest_date'].date()}, {ind['days_ago']}天前")
+                    print(f"  - {ind['code']} ({ind['name']}): 最新数据为 {ind['latest_date'].date()}, {ind['days_ago']}天前")
                 else:
-                    print(f"  • {ind['code']} ({ind['name']}): 完全没有数据")
+                    print(f"  - {ind['code']} ({ind['name']}): 完全没有数据")
         
         return report
     
