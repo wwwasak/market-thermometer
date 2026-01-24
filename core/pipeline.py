@@ -1269,16 +1269,20 @@ class MarketPipeline:
         self,
         raw_data: Dict[str, pd.Series],
         transformed_data: Dict[str, pd.Series],
-        view_type: str = 'daily'
+        view_type: str = 'daily',
+        recalculate_tr: bool = True
     ) -> int:
         """
         只保存原始数据和转换数据到数据库（不保存评分）
         
         对于低频指标（如TGA_D20），会自动填充到所有交易日
         
+        重要：保存后会自动重新计算TR值，确保新数据基于完整数据集的统计特性计算
+        
         @param {Dict[str, pd.Series]} raw_data - 原始数据
         @param {Dict[str, pd.Series]} transformed_data - 转换后数据
         @param {str} view_type - 视图类型
+        @param {bool} recalculate_tr - 保存后是否重新计算TR值（默认True）
         @returns {int} 保存的记录数
         """
         print(f"\n[INFO] 保存原始数据到数据库...")
@@ -1447,7 +1451,169 @@ class MarketPipeline:
             message=f"Saved {total_saved} raw data records for {self.market} {view_type}"
         )
         
+        # 重要：保存raw数据后，重新计算TR值
+        # 这确保新数据的TR值基于包含新数据在内的完整数据集计算
+        if recalculate_tr and len(all_series_codes) > 0:
+            print(f"\n[INFO] 保存完成，现在重新计算TR值以确保基于完整数据集...")
+            # 只重新计算本次保存的指标
+            codes_to_recalc = [
+                code for code in all_series_codes
+                if self.indicator_lookup.get(code, {}).get('transform', 'raw') != 'raw'
+            ]
+            
+            if codes_to_recalc:
+                updated_count = self.recalculate_tr_values(
+                    codes=codes_to_recalc,
+                    view_type=view_type,
+                    days_limit=None  # 重新计算所有历史数据以确保一致性
+                )
+                print(f"[OK] TR值重新计算完成，更新了 {updated_count} 条记录")
+        
         return total_saved
+    
+    def recalculate_tr_values(
+        self,
+        codes: Optional[List[str]] = None,
+        view_type: str = 'daily',
+        days_limit: Optional[int] = None
+    ) -> int:
+        """
+        重新计算指定指标的TR值（基于数据库中的完整raw数据）
+        
+        关键：此方法在保存新raw数据后调用，确保基于包含新数据在内的完整数据集计算TR值
+        
+        流程：
+        1. 从数据库加载指定指标的所有raw数据
+        2. 应用转换函数计算TR值（基于完整数据集的统计特性）
+        3. 更新数据库中的TR值
+        
+        @param {Optional[List[str]]} codes - 要重新计算的指标代码列表，None表示所有指标
+        @param {str} view_type - 视图类型
+        @param {Optional[int]} days_limit - 限制重新计算的天数，None表示所有历史数据
+        @returns {int} 更新的记录数
+        """
+        print(f"\n[INFO] 重新计算TR值...")
+        
+        if codes is None:
+            # 获取所有需要转换的指标
+            codes = [
+                indicator['code'] 
+                for indicator in self.indicator_lookup.values()
+                if indicator.get('transform', 'raw') != 'raw'
+            ]
+        
+        total_updated = 0
+        
+        for code in codes:
+            try:
+                indicator = self.indicator_lookup.get(code)
+                if not indicator:
+                    continue
+                
+                transform_type = indicator.get('transform', 'raw')
+                if transform_type == 'raw':
+                    continue
+                
+                # 1. 从数据库加载完整的raw数据
+                raw_series = self.repository.load_raw_series_by_code(
+                    code,
+                    view=view_type,
+                    limit_days=days_limit
+                )
+                
+                if raw_series is None or raw_series.empty:
+                    print(f"[SKIP] {code}: 数据库中无raw数据")
+                    continue
+                
+                print(f"[INFO] {code}: 从数据库加载了 {len(raw_series)} 条raw数据")
+                
+                # 2. 应用转换计算TR值（基于完整数据集）
+                try:
+                    tr_series = apply_transform(raw_series, transform_type)
+                    tr_series = self._ensure_naive_series(tr_series)
+                    
+                    if tr_series is None or tr_series.empty:
+                        print(f"[WARN] {code}: 转换后数据为空")
+                        continue
+                    
+                    print(f"[OK] {code}: 计算了 {len(tr_series)} 条TR值")
+                    
+                except Exception as e:
+                    print(f"[ERROR] {code}: 转换计算失败: {e}")
+                    continue
+                
+                # 3. 更新数据库中的TR值
+                meta = self.repository.get_series_meta_by_code(code)
+                if not meta or 'id' not in meta:
+                    print(f"[WARN] {code}: 未找到元数据")
+                    continue
+                
+                series_id = meta['id']
+                update_count = 0
+                
+                for date, tr_value in tr_series.items():
+                    if pd.isna(tr_value):
+                        continue
+                    
+                    # 准备日期
+                    if isinstance(date, pd.Timestamp):
+                        record_date = date.date()
+                    elif isinstance(date, datetime):
+                        record_date = date.date()
+                    else:
+                        record_date = date
+                    
+                    # 只更新TR值，不影响raw、z、score
+                    # 使用upsert_series_data的特性：如果只传value_tr，其他字段保持不变
+                    try:
+                        # 先获取现有记录
+                        existing = self.repository.get_series_data_point(
+                            series_id=series_id,
+                            date=record_date,
+                            view=view_type
+                        )
+                        
+                        if existing:
+                            # 更新现有记录的TR值
+                            self.repository.upsert_series_data(
+                                series_id=series_id,
+                                date=record_date,
+                                view=view_type,
+                                value_raw=existing.get('value_raw'),
+                                value_tr=float(tr_value),
+                                z=existing.get('z'),
+                                score=existing.get('score')
+                            )
+                            update_count += 1
+                        else:
+                            # 没有现有记录，只保存TR值（这种情况理论上不应该发生）
+                            self.repository.upsert_series_data(
+                                series_id=series_id,
+                                date=record_date,
+                                view=view_type,
+                                value_raw=None,
+                                value_tr=float(tr_value),
+                                z=None,
+                                score=None
+                            )
+                            update_count += 1
+                    
+                    except Exception as e:
+                        print(f"[WARN] {code}: 更新 {record_date} 的TR值失败: {e}")
+                        continue
+                
+                if update_count > 0:
+                    print(f"[OK] {code}: 更新了 {update_count} 条TR值")
+                    total_updated += update_count
+                
+            except Exception as e:
+                print(f"[ERROR] {code}: 重新计算TR值失败: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        print(f"[OK] 共更新 {total_updated} 条TR值")
+        return total_updated
     
     def save_to_database(
         self,

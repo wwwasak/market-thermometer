@@ -387,6 +387,47 @@ class Repository:
         finally:
             session.close()
     
+    def get_series_data_point(
+        self,
+        series_id: int,
+        date: date,
+        view: str = 'daily'
+    ) -> Optional[Dict]:
+        """
+        获取指定序列、日期、视图的单个数据点
+        
+        @param {int} series_id - 序列ID
+        @param {date} date - 日期
+        @param {str} view - 视图类型
+        @returns {Optional[Dict]} 数据点字典，包含value_raw、value_tr、z、score等字段
+        """
+        session = self.get_session()
+        try:
+            data_point = session.query(SeriesData).filter(
+                and_(
+                    SeriesData.series_id == series_id,
+                    SeriesData.date == date,
+                    SeriesData.view == view
+                )
+            ).first()
+            
+            if not data_point:
+                return None
+            
+            return {
+                'id': data_point.id,
+                'value_raw': data_point.value_raw,
+                'value_tr': data_point.value_tr,
+                'z': data_point.z,
+                'score': data_point.score
+            }
+            
+        except Exception as e:
+            print(f"[ERROR] 获取数据点失败: {e}")
+            return None
+        finally:
+            session.close()
+    
     # ==================== Regime 操作 ====================
     
     def upsert_regime(
