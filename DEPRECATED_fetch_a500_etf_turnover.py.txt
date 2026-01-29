@@ -1,0 +1,16 @@
+ℹ️ 此脚本功能已集成到 datasource.py，通常无需单独运行 ℹ️
+
+说明：
+- 本脚本的逻辑已完整集成到 core/datasource.py 的 _fetch_etf_flow() 方法
+- fetch_3years_data_auto.py 和 GUI手动获取都会自动调用该方法
+- 两者使用完全相同的逻辑：ETF列表、权重、计算方式、5日滚动和
+
+何时使用此脚本：
+- 仅在紧急情况下需要手动补充特定日期的ETF数据时使用
+- 正常情况下请使用统一的数据获取流程
+
+推荐方法：
+1. 使用 fetch_3years_data_auto.py 获取完整三年数据
+2. 使用 GUI 中的"手动获取最新数据"功能进行增量更新
+
+详情参见：ETF_NETFLOW_5D数据源统一说明.md

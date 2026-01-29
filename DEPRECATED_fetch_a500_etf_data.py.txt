@@ -1,0 +1,12 @@
+⚠️ 此脚本已废弃，请勿使用 ⚠️
+
+原因：
+- 使用了错误的API：stock_individual_fund_flow()
+- 获取的是"主力净流入"数据，不准确
+- 已被 datasource.py 中的 _fetch_etf_flow() 替代
+
+替代方案：
+1. 使用 fetch_3years_data_auto.py 获取完整三年数据
+2. 使用 GUI 中的"手动获取最新数据"功能
+
+详情参见：ETF_NETFLOW_5D数据源统一说明.md

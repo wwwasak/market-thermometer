@@ -513,9 +513,31 @@ class AKShareFetcher:
                 sh_turnover = _fetch_market_amount("1.000001")
                 sz_turnover = _fetch_market_amount("0.399001")
                 total_turnover = sh_turnover.add(sz_turnover, fill_value=0.0)
+                print(f"[OK] Fetched market turnover from EastMoney push2 API")
             except Exception as market_exc:
-                print(f"[WARNING] Failed to fetch market turnover data: {market_exc}")
-                total_turnover = pd.Series(0.0, index=value_raw.index)
+                print(f"[WARNING] Failed to fetch market turnover from EastMoney push2 API: {market_exc}")
+                print(f"[INFO] Trying fallback method using akshare stock_zh_index_daily_em...")
+                
+                # 备用方案：使用akshare的stock_zh_index_daily_em获取东财指数数据（包含成交额）
+                try:
+                    sh_df = self.ak.stock_zh_index_daily_em(symbol="sh000001")
+                    sh_df['date'] = pd.to_datetime(sh_df['date'])
+                    sh_df = sh_df.set_index('date').sort_index()
+                    sh_df = sh_df[(sh_df.index >= start_dt) & (sh_df.index <= end_dt)]
+                    sh_turnover_fallback = pd.to_numeric(sh_df['amount'], errors='coerce') / 1e8  # 元 -> 亿元
+                    
+                    sz_df = self.ak.stock_zh_index_daily_em(symbol="sz399001")
+                    sz_df['date'] = pd.to_datetime(sz_df['date'])
+                    sz_df = sz_df.set_index('date').sort_index()
+                    sz_df = sz_df[(sz_df.index >= start_dt) & (sz_df.index <= end_dt)]
+                    sz_turnover_fallback = pd.to_numeric(sz_df['amount'], errors='coerce') / 1e8  # 元 -> 亿元
+                    
+                    total_turnover = sh_turnover_fallback.add(sz_turnover_fallback, fill_value=0.0)
+                    print(f"[OK] Fallback successful: got {len(total_turnover)} market turnover records via akshare")
+                except Exception as fallback_exc:
+                    print(f"[ERROR] Fallback also failed: {fallback_exc}")
+                    print(f"[WARNING] Setting total_turnover to 0 - NORTH_TURNOVER_SHARE ratio will be 0")
+                    total_turnover = pd.Series(0.0, index=value_raw.index)
 
             total_turnover = total_turnover.reindex(value_raw.index, fill_value=0.0)
             with np.errstate(divide="ignore", invalid="ignore"):
