@@ -535,9 +535,62 @@ class AKShareFetcher:
                     total_turnover = sh_turnover_fallback.add(sz_turnover_fallback, fill_value=0.0)
                     print(f"[OK] Fallback successful: got {len(total_turnover)} market turnover records via akshare")
                 except Exception as fallback_exc:
-                    print(f"[ERROR] Fallback also failed: {fallback_exc}")
-                    print(f"[WARNING] Setting total_turnover to 0 - NORTH_TURNOVER_SHARE ratio will be 0")
-                    total_turnover = pd.Series(0.0, index=value_raw.index)
+                    print(f"[WARNING] Fallback (stock_zh_index_daily_em) also failed: {fallback_exc}")
+                    print(f"[INFO] Trying second fallback using CSIndex all-share turnover...")
+                    try:
+                        csindex_df = self.ak.stock_zh_index_hist_csindex(
+                            symbol="000985",  # 中证全指
+                            start_date=start_dt.strftime("%Y%m%d"),
+                            end_date=end_dt.strftime("%Y%m%d"),
+                        )
+
+                        if csindex_df is None or csindex_df.empty:
+                            raise DataFetchError("stock_zh_index_hist_csindex returned empty data")
+
+                        date_col = None
+                        for col in csindex_df.columns:
+                            if "日期" in col or "交易日" in col:
+                                date_col = col
+                                break
+                        if date_col is None:
+                            date_col = csindex_df.columns[0]
+
+                        turnover_col = None
+                        for col in csindex_df.columns:
+                            if "成交金额" in col or ("成交" in col and "金" in col):
+                                turnover_col = col
+                                break
+                        if turnover_col is None:
+                            # 某些Windows终端编码下列名会乱码，成交金额通常位于第14列（索引13）
+                            if len(csindex_df.columns) >= 14:
+                                turnover_col = csindex_df.columns[13]
+                            else:
+                                raise DataFetchError(
+                                    f"Cannot find turnover column in csindex data: {list(csindex_df.columns)}"
+                                )
+
+                        csindex_df["date"] = pd.to_datetime(csindex_df[date_col], errors="coerce")
+                        csindex_df = csindex_df.dropna(subset=["date"])
+                        csindex_df = csindex_df.sort_values("date")
+                        csindex_df = csindex_df[(csindex_df["date"] >= start_dt) & (csindex_df["date"] <= end_dt)]
+
+                        total_turnover = pd.Series(
+                            pd.to_numeric(csindex_df[turnover_col], errors="coerce").values,
+                            index=csindex_df["date"].dt.normalize(),
+                            dtype=float,
+                        ).dropna()
+
+                        if total_turnover.empty:
+                            raise DataFetchError("No valid turnover rows after CSIndex filtering")
+
+                        print(
+                            f"[OK] Second fallback successful: got {len(total_turnover)} "
+                            f"market turnover records via CSIndex 000985"
+                        )
+                    except Exception as second_fallback_exc:
+                        print(f"[ERROR] Second fallback also failed: {second_fallback_exc}")
+                        print(f"[WARNING] Setting total_turnover to 0 - NORTH_TURNOVER_SHARE ratio will be 0")
+                        total_turnover = pd.Series(0.0, index=value_raw.index)
 
             total_turnover = total_turnover.reindex(value_raw.index, fill_value=0.0)
             with np.errstate(divide="ignore", invalid="ignore"):
